@@ -1,0 +1,283 @@
+package resource
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+
+	"database/sql"
+
+	"github.com/aep-dev/aep-lib-go/pkg/api"
+	"github.com/aep-dev/aep-lib-go/pkg/openapi"
+
+	"github.com/aep-dev/aepbase/pkg/db"
+)
+
+func RegisterRoutes(mux *http.ServeMux, d *sql.DB, r *api.Resource) {
+	collectionPath := "/" + strings.Join(r.PatternElems[:len(r.PatternElems)-1], "/")
+	resourcePath := "/" + strings.Join(r.PatternElems, "/")
+
+	mux.HandleFunc("POST "+collectionPath, makeCreateHandler(d, r))
+	mux.HandleFunc("GET "+collectionPath, makeListHandler(d, r))
+	mux.HandleFunc("GET "+resourcePath, makeGetHandler(d, r))
+	mux.HandleFunc("PATCH "+resourcePath, makeUpdateHandler(d, r))
+	mux.HandleFunc("DELETE "+resourcePath, makeDeleteHandler(d, r))
+}
+
+func makeCreateHandler(d *sql.DB, r *api.Resource) http.HandlerFunc {
+	return func(w http.ResponseWriter, req *http.Request) {
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+
+		var fields map[string]any
+		if err := json.Unmarshal(body, &fields); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid JSON")
+			return
+		}
+
+		// Get or generate ID.
+		id := req.URL.Query().Get("id")
+		if id == "" {
+			id = generateID()
+		}
+
+		// Extract parent IDs from path.
+		parentIDs := extractParentIDs(req, r)
+
+		// Build the AEP path.
+		path := buildResourcePath(r, parentIDs, id)
+		now := time.Now().UTC().Format(time.RFC3339)
+
+		// Remove standard fields from user data — they are managed by us.
+		delete(fields, "id")
+		delete(fields, "path")
+		delete(fields, "create_time")
+		delete(fields, "update_time")
+
+		stored := &StoredResource{
+			ID:         id,
+			Path:       path,
+			CreateTime: now,
+			UpdateTime: now,
+			Fields:     fields,
+		}
+
+		if err := Insert(d, r.Plural, stored, parentIDs, r.Schema); err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to create resource: %v", err))
+			return
+		}
+
+		writeResourceJSON(w, http.StatusOK, stored, r.Schema)
+	}
+}
+
+func makeGetHandler(d *sql.DB, r *api.Resource) http.HandlerFunc {
+	return func(w http.ResponseWriter, req *http.Request) {
+		parentIDs := extractParentIDs(req, r)
+		id := req.PathValue(r.Singular)
+		path := buildResourcePath(r, parentIDs, id)
+
+		stored, err := Get(d, r.Plural, path, r.Schema)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("database error: %v", err))
+			return
+		}
+		if stored == nil {
+			writeError(w, http.StatusNotFound, fmt.Sprintf("resource %q not found", path))
+			return
+		}
+
+		writeResourceJSON(w, http.StatusOK, stored, r.Schema)
+	}
+}
+
+func makeListHandler(d *sql.DB, r *api.Resource) http.HandlerFunc {
+	return func(w http.ResponseWriter, req *http.Request) {
+		parentIDs := extractParentIDs(req, r)
+
+		pageSize := 50
+		if ps := req.URL.Query().Get("max_page_size"); ps != "" {
+			if n, err := strconv.Atoi(ps); err == nil && n > 0 {
+				pageSize = n
+				if pageSize > 1000 {
+					pageSize = 1000
+				}
+			}
+		}
+		pageToken := req.URL.Query().Get("page_token")
+
+		results, nextPageToken, err := List(d, r.Plural, parentIDs, r.Schema, pageSize, pageToken)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("database error: %v", err))
+			return
+		}
+
+		items := make([]map[string]any, 0, len(results))
+		for _, sr := range results {
+			items = append(items, storedToMap(&sr, r.Schema))
+		}
+
+		resp := map[string]any{
+			"results": items,
+		}
+		if nextPageToken != "" {
+			resp["next_page_token"] = nextPageToken
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}
+}
+
+func makeUpdateHandler(d *sql.DB, r *api.Resource) http.HandlerFunc {
+	return func(w http.ResponseWriter, req *http.Request) {
+		parentIDs := extractParentIDs(req, r)
+		id := req.PathValue(r.Singular)
+		path := buildResourcePath(r, parentIDs, id)
+
+		existing, err := Get(d, r.Plural, path, r.Schema)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("database error: %v", err))
+			return
+		}
+		if existing == nil {
+			writeError(w, http.StatusNotFound, fmt.Sprintf("resource %q not found", path))
+			return
+		}
+
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+
+		var patch map[string]any
+		if err := json.Unmarshal(body, &patch); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid JSON")
+			return
+		}
+
+		// Remove standard fields from patch.
+		delete(patch, "id")
+		delete(patch, "path")
+		delete(patch, "create_time")
+		delete(patch, "update_time")
+
+		// Merge patch onto existing fields.
+		for k, v := range patch {
+			existing.Fields[k] = v
+		}
+
+		now := time.Now().UTC().Format(time.RFC3339)
+		existing.UpdateTime = now
+
+		if err := Update(d, r.Plural, path, existing.Fields, now, r.Schema); err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to update resource: %v", err))
+			return
+		}
+
+		writeResourceJSON(w, http.StatusOK, existing, r.Schema)
+	}
+}
+
+func makeDeleteHandler(d *sql.DB, r *api.Resource) http.HandlerFunc {
+	return func(w http.ResponseWriter, req *http.Request) {
+		parentIDs := extractParentIDs(req, r)
+		id := req.PathValue(r.Singular)
+		path := buildResourcePath(r, parentIDs, id)
+
+		deleted, err := Delete(d, r.Plural, path)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("database error: %v", err))
+			return
+		}
+		if !deleted {
+			writeError(w, http.StatusNotFound, fmt.Sprintf("resource %q not found", path))
+			return
+		}
+
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// extractParentIDs pulls parent IDs from the URL path values.
+// PatternElems: ["publishers", "{publisher}", "books", "{book}"]
+// Parents are at odd indices before the last two elements.
+func extractParentIDs(req *http.Request, r *api.Resource) map[string]string {
+	parentIDs := make(map[string]string)
+	elems := r.PatternElems
+	// Everything before the last 2 elements is parent pairs.
+	for i := 0; i+1 < len(elems)-2; i += 2 {
+		paramName := strings.Trim(elems[i+1], "{}")
+		parentIDs[paramName] = req.PathValue(paramName)
+	}
+	return parentIDs
+}
+
+// buildResourcePath constructs the AEP path like "publishers/pub1/books/book1".
+func buildResourcePath(r *api.Resource, parentIDs map[string]string, id string) string {
+	var parts []string
+	elems := r.PatternElems
+	for i := 0; i < len(elems)-2; i += 2 {
+		collection := elems[i]
+		paramName := strings.Trim(elems[i+1], "{}")
+		parts = append(parts, collection, parentIDs[paramName])
+	}
+	parts = append(parts, elems[len(elems)-2], id)
+	return strings.Join(parts, "/")
+}
+
+func storedToMap(s *StoredResource, schema *openapi.Schema) map[string]any {
+	m := map[string]any{
+		"id":          s.ID,
+		"path":        s.Path,
+		"create_time": s.CreateTime,
+		"update_time": s.UpdateTime,
+	}
+	for propName := range schema.Properties {
+		if v, ok := s.Fields[propName]; ok {
+			m[propName] = v
+		}
+	}
+	return m
+}
+
+func writeResourceJSON(w http.ResponseWriter, status int, s *StoredResource, schema *openapi.Schema) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(storedToMap(s, schema))
+}
+
+func writeError(w http.ResponseWriter, status int, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(map[string]any{
+		"error": map[string]any{
+			"code":    status,
+			"message": msg,
+		},
+	})
+}
+
+func generateID() string {
+	// Simple short ID based on timestamp + random suffix.
+	return fmt.Sprintf("%x", time.Now().UnixNano())
+}
+
+func columnsFromSchema(schema *openapi.Schema) []db.ColumnDef {
+	var cols []db.ColumnDef
+	for name, prop := range schema.Properties {
+		cols = append(cols, db.ColumnDef{
+			Name:    name,
+			SQLType: db.SchemaTypeToSQLite(prop.Type, prop.Format),
+		})
+	}
+	return cols
+}

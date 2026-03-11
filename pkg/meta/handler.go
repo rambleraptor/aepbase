@@ -1,0 +1,375 @@
+package meta
+
+import (
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+
+	"encoding/base64"
+)
+
+// StateManager is the interface that the central state must implement.
+// This avoids a circular import between meta and apistate.
+type StateManager interface {
+	GetDB() *sql.DB
+	AddResource(def ResourceDefinition) error
+	RemoveResource(singular string) error
+	UpdateResourceSchema(def ResourceDefinition, oldDef ResourceDefinition) error
+}
+
+func RegisterRoutes(mux *http.ServeMux, state StateManager) {
+	mux.HandleFunc("POST /resources", makeCreateHandler(state))
+	mux.HandleFunc("GET /resources", makeListHandler(state))
+	mux.HandleFunc("GET /resources/{resource}", makeGetHandler(state))
+	mux.HandleFunc("PATCH /resources/{resource}", makeUpdateHandler(state))
+	mux.HandleFunc("DELETE /resources/{resource}", makeDeleteHandler(state))
+}
+
+func makeCreateHandler(state StateManager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+
+		var def ResourceDefinition
+		if err := json.Unmarshal(body, &def); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+			return
+		}
+
+		if def.Singular == "" || def.Plural == "" {
+			writeError(w, http.StatusBadRequest, "singular and plural are required")
+			return
+		}
+		if strings.HasPrefix(def.Plural, "_") {
+			writeError(w, http.StatusBadRequest, "plural must not start with underscore")
+			return
+		}
+
+		// User-settable ID or generate one.
+		id := r.URL.Query().Get("id")
+		if id == "" {
+			id = def.Singular
+		}
+		def.ID = id
+		def.Path = "resources/" + id
+		now := time.Now().UTC().Format(time.RFC3339)
+		def.CreateTime = now
+		def.UpdateTime = now
+
+		// Validate parents exist.
+		for _, parentSingular := range def.Parents {
+			existing, err := getDefinition(state.GetDB(), parentSingular)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, fmt.Sprintf("checking parent: %v", err))
+				return
+			}
+			if existing == nil {
+				writeError(w, http.StatusBadRequest, fmt.Sprintf("parent resource %q not found", parentSingular))
+				return
+			}
+		}
+
+		// Check uniqueness.
+		existing, _ := getDefinitionByID(state.GetDB(), id)
+		if existing != nil {
+			writeError(w, http.StatusConflict, fmt.Sprintf("resource with id %q already exists", id))
+			return
+		}
+
+		// Persist to _resources.
+		if err := insertDefinition(state.GetDB(), &def); err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("saving definition: %v", err))
+			return
+		}
+
+		// Register routes and create table.
+		if err := state.AddResource(def); err != nil {
+			// Rollback the meta row.
+			deleteDefinition(state.GetDB(), id)
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("registering resource: %v", err))
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(def)
+	}
+}
+
+func makeGetHandler(state StateManager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("resource")
+		def, err := getDefinitionByID(state.GetDB(), id)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("database error: %v", err))
+			return
+		}
+		if def == nil {
+			writeError(w, http.StatusNotFound, fmt.Sprintf("resource %q not found", id))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(def)
+	}
+}
+
+func makeListHandler(state StateManager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		pageSize := 50
+		if ps := r.URL.Query().Get("max_page_size"); ps != "" {
+			if n, err := strconv.Atoi(ps); err == nil && n > 0 {
+				pageSize = n
+				if pageSize > 1000 {
+					pageSize = 1000
+				}
+			}
+		}
+		pageToken := r.URL.Query().Get("page_token")
+
+		cursor := ""
+		if pageToken != "" {
+			decoded, err := base64.StdEncoding.DecodeString(pageToken)
+			if err == nil {
+				cursor = string(decoded)
+			}
+		}
+
+		defs, err := listDefinitions(state.GetDB(), pageSize+1, cursor)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("database error: %v", err))
+			return
+		}
+
+		nextPageToken := ""
+		if len(defs) > pageSize {
+			lastID := defs[pageSize-1].ID
+			nextPageToken = base64.StdEncoding.EncodeToString([]byte(lastID))
+			defs = defs[:pageSize]
+		}
+
+		resp := map[string]any{
+			"results": defs,
+		}
+		if nextPageToken != "" {
+			resp["next_page_token"] = nextPageToken
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}
+}
+
+func makeUpdateHandler(state StateManager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("resource")
+		existing, err := getDefinitionByID(state.GetDB(), id)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("database error: %v", err))
+			return
+		}
+		if existing == nil {
+			writeError(w, http.StatusNotFound, fmt.Sprintf("resource %q not found", id))
+			return
+		}
+
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+
+		var patch ResourceDefinition
+		if err := json.Unmarshal(body, &patch); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+			return
+		}
+
+		// Disallow changing parents.
+		if patch.Parents != nil && !stringSliceEqual(patch.Parents, existing.Parents) {
+			writeError(w, http.StatusBadRequest, "changing parents is not supported")
+			return
+		}
+
+		// Disallow renaming singular/plural.
+		if patch.Singular != "" && patch.Singular != existing.Singular {
+			writeError(w, http.StatusBadRequest, "changing singular name is not supported")
+			return
+		}
+		if patch.Plural != "" && patch.Plural != existing.Plural {
+			writeError(w, http.StatusBadRequest, "changing plural name is not supported")
+			return
+		}
+
+		oldDef := *existing
+
+		// Merge schema if provided.
+		if patch.Schema.Properties != nil {
+			existing.Schema = patch.Schema
+		}
+
+		now := time.Now().UTC().Format(time.RFC3339)
+		existing.UpdateTime = now
+
+		// Update schema in DB and SQLite table.
+		if err := state.UpdateResourceSchema(*existing, oldDef); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
+		if err := updateDefinition(state.GetDB(), existing); err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("saving definition: %v", err))
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(existing)
+	}
+}
+
+func makeDeleteHandler(state StateManager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("resource")
+		existing, err := getDefinitionByID(state.GetDB(), id)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("database error: %v", err))
+			return
+		}
+		if existing == nil {
+			writeError(w, http.StatusNotFound, fmt.Sprintf("resource %q not found", id))
+			return
+		}
+
+		if err := state.RemoveResource(existing.Singular); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
+		if err := deleteDefinition(state.GetDB(), id); err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("deleting definition: %v", err))
+			return
+		}
+
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// --- SQL helpers for _resources ---
+
+func insertDefinition(db *sql.DB, def *ResourceDefinition) error {
+	schemaJSON, _ := json.Marshal(def.Schema)
+	parentsJSON, _ := json.Marshal(def.Parents)
+	_, err := db.Exec(
+		"INSERT INTO _resources (id, singular, plural, schema_json, parents_json, create_time, update_time) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		def.ID, def.Singular, def.Plural, string(schemaJSON), string(parentsJSON), def.CreateTime, def.UpdateTime,
+	)
+	return err
+}
+
+func getDefinitionByID(db *sql.DB, id string) (*ResourceDefinition, error) {
+	row := db.QueryRow("SELECT id, singular, plural, schema_json, parents_json, create_time, update_time FROM _resources WHERE id = ?", id)
+	return scanDefinition(row)
+}
+
+func getDefinition(db *sql.DB, singular string) (*ResourceDefinition, error) {
+	row := db.QueryRow("SELECT id, singular, plural, schema_json, parents_json, create_time, update_time FROM _resources WHERE singular = ?", singular)
+	return scanDefinition(row)
+}
+
+func scanDefinition(row *sql.Row) (*ResourceDefinition, error) {
+	var def ResourceDefinition
+	var schemaJSON, parentsJSON string
+	err := row.Scan(&def.ID, &def.Singular, &def.Plural, &schemaJSON, &parentsJSON, &def.CreateTime, &def.UpdateTime)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	json.Unmarshal([]byte(schemaJSON), &def.Schema)
+	json.Unmarshal([]byte(parentsJSON), &def.Parents)
+	def.Path = "resources/" + def.ID
+	return &def, nil
+}
+
+func listDefinitions(db *sql.DB, limit int, cursor string) ([]ResourceDefinition, error) {
+	var rows *sql.Rows
+	var err error
+	if cursor != "" {
+		rows, err = db.Query(
+			"SELECT id, singular, plural, schema_json, parents_json, create_time, update_time FROM _resources WHERE id > ? ORDER BY id LIMIT ?",
+			cursor, limit,
+		)
+	} else {
+		rows, err = db.Query(
+			"SELECT id, singular, plural, schema_json, parents_json, create_time, update_time FROM _resources ORDER BY id LIMIT ?",
+			limit,
+		)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var defs []ResourceDefinition
+	for rows.Next() {
+		var def ResourceDefinition
+		var schemaJSON, parentsJSON string
+		if err := rows.Scan(&def.ID, &def.Singular, &def.Plural, &schemaJSON, &parentsJSON, &def.CreateTime, &def.UpdateTime); err != nil {
+			return nil, err
+		}
+		json.Unmarshal([]byte(schemaJSON), &def.Schema)
+		json.Unmarshal([]byte(parentsJSON), &def.Parents)
+		def.Path = "resources/" + def.ID
+		defs = append(defs, def)
+	}
+	return defs, nil
+}
+
+func updateDefinition(db *sql.DB, def *ResourceDefinition) error {
+	schemaJSON, _ := json.Marshal(def.Schema)
+	_, err := db.Exec(
+		"UPDATE _resources SET schema_json = ?, update_time = ? WHERE id = ?",
+		string(schemaJSON), def.UpdateTime, def.ID,
+	)
+	return err
+}
+
+func deleteDefinition(db *sql.DB, id string) error {
+	_, err := db.Exec("DELETE FROM _resources WHERE id = ?", id)
+	return err
+}
+
+func LoadAll(db *sql.DB) ([]ResourceDefinition, error) {
+	return listDefinitions(db, 10000, "")
+}
+
+func writeError(w http.ResponseWriter, status int, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(map[string]any{
+		"error": map[string]any{
+			"code":    status,
+			"message": msg,
+		},
+	})
+}
+
+func stringSliceEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}

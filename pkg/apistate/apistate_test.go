@@ -1,0 +1,745 @@
+package apistate_test
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"github.com/aep-dev/aepbase/pkg/apistate"
+	"github.com/aep-dev/aepbase/pkg/db"
+	"github.com/aep-dev/aepbase/pkg/meta"
+)
+
+// helper to create a fresh State with an in-memory SQLite DB.
+func newTestState(t *testing.T) *apistate.State {
+	t.Helper()
+	d, err := db.Init(":memory:")
+	if err != nil {
+		t.Fatalf("db.Init: %v", err)
+	}
+	t.Cleanup(func() { d.Close() })
+	return apistate.NewState(d, "http://localhost:8080")
+}
+
+func doRequest(t *testing.T, handler http.Handler, method, path, body string) *http.Response {
+	t.Helper()
+	var bodyReader io.Reader
+	if body != "" {
+		bodyReader = strings.NewReader(body)
+	}
+	req := httptest.NewRequest(method, path, bodyReader)
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	return w.Result()
+}
+
+func readJSON(t *testing.T, resp *http.Response) map[string]any {
+	t.Helper()
+	defer resp.Body.Close()
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("reading body: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatalf("parsing JSON %q: %v", string(b), err)
+	}
+	return m
+}
+
+func createResource(t *testing.T, h http.Handler, id, singular, plural string, parents []string, props map[string]any) map[string]any {
+	t.Helper()
+	schema := map[string]any{"properties": props}
+	body := map[string]any{
+		"singular": singular,
+		"plural":   plural,
+		"schema":   schema,
+	}
+	if len(parents) > 0 {
+		body["parents"] = parents
+	}
+	b, _ := json.Marshal(body)
+	path := "/resources"
+	if id != "" {
+		path += "?id=" + id
+	}
+	resp := doRequest(t, h, "POST", path, string(b))
+	if resp.StatusCode != 200 {
+		m := readJSON(t, resp)
+		t.Fatalf("createResource %s: status %d: %v", singular, resp.StatusCode, m)
+	}
+	return readJSON(t, resp)
+}
+
+// --- Meta-API Tests ---
+
+func TestCreateResource(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+	m := createResource(t, h, "publisher", "publisher", "publishers", nil, map[string]any{
+		"name": map[string]any{"type": "string"},
+	})
+	if m["id"] != "publisher" {
+		t.Errorf("expected id=publisher, got %v", m["id"])
+	}
+	if m["path"] != "resources/publisher" {
+		t.Errorf("expected path=resources/publisher, got %v", m["path"])
+	}
+	if m["create_time"] == nil || m["update_time"] == nil {
+		t.Error("expected timestamps")
+	}
+}
+
+func TestCreateResourceWithUserID(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+	m := createResource(t, h, "my-custom-id", "publisher", "publishers", nil, map[string]any{
+		"name": map[string]any{"type": "string"},
+	})
+	if m["id"] != "my-custom-id" {
+		t.Errorf("expected id=my-custom-id, got %v", m["id"])
+	}
+}
+
+func TestCreateResourceAutoID(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+	m := createResource(t, h, "", "publisher", "publishers", nil, map[string]any{
+		"name": map[string]any{"type": "string"},
+	})
+	// Auto ID defaults to singular name.
+	if m["id"] != "publisher" {
+		t.Errorf("expected id=publisher (auto), got %v", m["id"])
+	}
+}
+
+func TestCreateResourceDuplicate(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+	createResource(t, h, "publisher", "publisher", "publishers", nil, map[string]any{
+		"name": map[string]any{"type": "string"},
+	})
+	body := `{"singular":"publisher","plural":"publishers2","schema":{"properties":{"name":{"type":"string"}}}}`
+	resp := doRequest(t, h, "POST", "/resources?id=publisher", body)
+	if resp.StatusCode != 409 {
+		t.Errorf("expected 409, got %d", resp.StatusCode)
+	}
+}
+
+func TestCreateResourceMissingFields(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+	resp := doRequest(t, h, "POST", "/resources", `{"singular":"","plural":""}`)
+	if resp.StatusCode != 400 {
+		t.Errorf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestCreateResourceInvalidParent(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+	body := `{"singular":"book","plural":"books","parents":["nonexistent"],"schema":{"properties":{"title":{"type":"string"}}}}`
+	resp := doRequest(t, h, "POST", "/resources?id=book", body)
+	if resp.StatusCode != 400 {
+		t.Errorf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestGetResource(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+	createResource(t, h, "publisher", "publisher", "publishers", nil, map[string]any{
+		"name": map[string]any{"type": "string"},
+	})
+	resp := doRequest(t, h, "GET", "/resources/publisher", "")
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	m := readJSON(t, resp)
+	if m["singular"] != "publisher" {
+		t.Errorf("expected singular=publisher, got %v", m["singular"])
+	}
+}
+
+func TestGetResourceNotFound(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+	resp := doRequest(t, h, "GET", "/resources/nonexistent", "")
+	if resp.StatusCode != 404 {
+		t.Errorf("expected 404, got %d", resp.StatusCode)
+	}
+}
+
+func TestListResources(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+	createResource(t, h, "publisher", "publisher", "publishers", nil, map[string]any{
+		"name": map[string]any{"type": "string"},
+	})
+	createResource(t, h, "author", "author", "authors", nil, map[string]any{
+		"name": map[string]any{"type": "string"},
+	})
+	resp := doRequest(t, h, "GET", "/resources", "")
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	m := readJSON(t, resp)
+	results := m["results"].([]any)
+	if len(results) != 2 {
+		t.Errorf("expected 2 results, got %d", len(results))
+	}
+}
+
+func TestDeleteResource(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+	createResource(t, h, "publisher", "publisher", "publishers", nil, map[string]any{
+		"name": map[string]any{"type": "string"},
+	})
+	resp := doRequest(t, h, "DELETE", "/resources/publisher", "")
+	if resp.StatusCode != 204 {
+		t.Errorf("expected 204, got %d", resp.StatusCode)
+	}
+	resp = doRequest(t, h, "GET", "/resources/publisher", "")
+	if resp.StatusCode != 404 {
+		t.Errorf("expected 404 after delete, got %d", resp.StatusCode)
+	}
+}
+
+func TestDeleteResourceWithChildren(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+	createResource(t, h, "publisher", "publisher", "publishers", nil, map[string]any{
+		"name": map[string]any{"type": "string"},
+	})
+	createResource(t, h, "book", "book", "books", []string{"publisher"}, map[string]any{
+		"title": map[string]any{"type": "string"},
+	})
+	resp := doRequest(t, h, "DELETE", "/resources/publisher", "")
+	if resp.StatusCode != 400 {
+		t.Errorf("expected 400 (has children), got %d", resp.StatusCode)
+	}
+}
+
+func TestUpdateResourceAddColumn(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+	createResource(t, h, "publisher", "publisher", "publishers", nil, map[string]any{
+		"name": map[string]any{"type": "string"},
+	})
+	// Create an instance first.
+	doRequest(t, h, "POST", "/publishers?id=acme", `{"name":"Acme"}`)
+
+	// Add a column.
+	patch := `{"schema":{"properties":{"name":{"type":"string"},"location":{"type":"string"}}}}`
+	resp := doRequest(t, h, "PATCH", "/resources/publisher", patch)
+	if resp.StatusCode != 200 {
+		m := readJSON(t, resp)
+		t.Fatalf("expected 200, got %d: %v", resp.StatusCode, m)
+	}
+
+	// Use the new column.
+	resp = doRequest(t, h, "PATCH", "/publishers/acme", `{"location":"NYC"}`)
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200 on update, got %d", resp.StatusCode)
+	}
+	m := readJSON(t, resp)
+	if m["location"] != "NYC" {
+		t.Errorf("expected location=NYC, got %v", m["location"])
+	}
+	if m["name"] != "Acme" {
+		t.Errorf("expected name=Acme preserved, got %v", m["name"])
+	}
+}
+
+func TestUpdateResourceRemoveColumn(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+	createResource(t, h, "publisher", "publisher", "publishers", nil, map[string]any{
+		"name":     map[string]any{"type": "string"},
+		"location": map[string]any{"type": "string"},
+	})
+	doRequest(t, h, "POST", "/publishers?id=acme", `{"name":"Acme","location":"NYC"}`)
+
+	// Remove location column.
+	patch := `{"schema":{"properties":{"name":{"type":"string"}}}}`
+	resp := doRequest(t, h, "PATCH", "/resources/publisher", patch)
+	if resp.StatusCode != 200 {
+		m := readJSON(t, resp)
+		t.Fatalf("expected 200, got %d: %v", resp.StatusCode, m)
+	}
+
+	// Verify existing data still has name.
+	resp = doRequest(t, h, "GET", "/publishers/acme", "")
+	m := readJSON(t, resp)
+	if m["name"] != "Acme" {
+		t.Errorf("expected name=Acme after column removal, got %v", m["name"])
+	}
+	// location should no longer appear.
+	if _, ok := m["location"]; ok {
+		t.Errorf("expected location to be gone, but it's still present: %v", m["location"])
+	}
+}
+
+func TestUpdateResourceChangeType(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+	createResource(t, h, "publisher", "publisher", "publishers", nil, map[string]any{
+		"name": map[string]any{"type": "string"},
+	})
+	patch := `{"schema":{"properties":{"name":{"type":"integer"}}}}`
+	resp := doRequest(t, h, "PATCH", "/resources/publisher", patch)
+	if resp.StatusCode != 400 {
+		t.Errorf("expected 400 on type change, got %d", resp.StatusCode)
+	}
+}
+
+func TestUpdateResourceChangeParents(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+	createResource(t, h, "publisher", "publisher", "publishers", nil, map[string]any{
+		"name": map[string]any{"type": "string"},
+	})
+	createResource(t, h, "author", "author", "authors", nil, map[string]any{
+		"name": map[string]any{"type": "string"},
+	})
+	createResource(t, h, "book", "book", "books", []string{"publisher"}, map[string]any{
+		"title": map[string]any{"type": "string"},
+	})
+	patch := `{"parents":["author"]}`
+	resp := doRequest(t, h, "PATCH", "/resources/book", patch)
+	if resp.StatusCode != 400 {
+		t.Errorf("expected 400 on parent change, got %d", resp.StatusCode)
+	}
+}
+
+// --- Dynamic Resource CRUD Tests ---
+
+func TestCreateInstance(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+	createResource(t, h, "publisher", "publisher", "publishers", nil, map[string]any{
+		"name":     map[string]any{"type": "string"},
+		"location": map[string]any{"type": "string"},
+	})
+	resp := doRequest(t, h, "POST", "/publishers?id=acme", `{"name":"Acme","location":"NYC"}`)
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	m := readJSON(t, resp)
+	if m["id"] != "acme" {
+		t.Errorf("expected id=acme, got %v", m["id"])
+	}
+	if m["path"] != "publishers/acme" {
+		t.Errorf("expected path=publishers/acme, got %v", m["path"])
+	}
+	if m["name"] != "Acme" {
+		t.Errorf("expected name=Acme, got %v", m["name"])
+	}
+	if m["create_time"] == nil || m["update_time"] == nil {
+		t.Error("expected timestamps")
+	}
+}
+
+func TestCreateInstanceAutoID(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+	createResource(t, h, "publisher", "publisher", "publishers", nil, map[string]any{
+		"name": map[string]any{"type": "string"},
+	})
+	resp := doRequest(t, h, "POST", "/publishers", `{"name":"Acme"}`)
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	m := readJSON(t, resp)
+	if m["id"] == nil || m["id"] == "" {
+		t.Error("expected auto-generated id")
+	}
+}
+
+func TestGetInstance(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+	createResource(t, h, "publisher", "publisher", "publishers", nil, map[string]any{
+		"name": map[string]any{"type": "string"},
+	})
+	doRequest(t, h, "POST", "/publishers?id=acme", `{"name":"Acme"}`)
+
+	resp := doRequest(t, h, "GET", "/publishers/acme", "")
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	m := readJSON(t, resp)
+	if m["name"] != "Acme" {
+		t.Errorf("expected name=Acme, got %v", m["name"])
+	}
+}
+
+func TestGetInstanceNotFound(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+	createResource(t, h, "publisher", "publisher", "publishers", nil, map[string]any{
+		"name": map[string]any{"type": "string"},
+	})
+	resp := doRequest(t, h, "GET", "/publishers/nonexistent", "")
+	if resp.StatusCode != 404 {
+		t.Errorf("expected 404, got %d", resp.StatusCode)
+	}
+}
+
+func TestUpdateInstance(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+	createResource(t, h, "publisher", "publisher", "publishers", nil, map[string]any{
+		"name": map[string]any{"type": "string"},
+	})
+	doRequest(t, h, "POST", "/publishers?id=acme", `{"name":"Acme"}`)
+
+	resp := doRequest(t, h, "PATCH", "/publishers/acme", `{"name":"Acme Corp"}`)
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	m := readJSON(t, resp)
+	if m["name"] != "Acme Corp" {
+		t.Errorf("expected name=Acme Corp, got %v", m["name"])
+	}
+}
+
+func TestUpdateInstancePartial(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+	createResource(t, h, "publisher", "publisher", "publishers", nil, map[string]any{
+		"name":     map[string]any{"type": "string"},
+		"location": map[string]any{"type": "string"},
+	})
+	doRequest(t, h, "POST", "/publishers?id=acme", `{"name":"Acme","location":"NYC"}`)
+
+	// Only update name.
+	resp := doRequest(t, h, "PATCH", "/publishers/acme", `{"name":"Acme Corp"}`)
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	m := readJSON(t, resp)
+	if m["name"] != "Acme Corp" {
+		t.Errorf("expected name=Acme Corp, got %v", m["name"])
+	}
+	if m["location"] != "NYC" {
+		t.Errorf("expected location=NYC preserved, got %v", m["location"])
+	}
+}
+
+func TestDeleteInstance(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+	createResource(t, h, "publisher", "publisher", "publishers", nil, map[string]any{
+		"name": map[string]any{"type": "string"},
+	})
+	doRequest(t, h, "POST", "/publishers?id=acme", `{"name":"Acme"}`)
+
+	resp := doRequest(t, h, "DELETE", "/publishers/acme", "")
+	if resp.StatusCode != 204 {
+		t.Errorf("expected 204, got %d", resp.StatusCode)
+	}
+}
+
+func TestDeleteInstanceNotFound(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+	createResource(t, h, "publisher", "publisher", "publishers", nil, map[string]any{
+		"name": map[string]any{"type": "string"},
+	})
+	resp := doRequest(t, h, "DELETE", "/publishers/nonexistent", "")
+	if resp.StatusCode != 404 {
+		t.Errorf("expected 404, got %d", resp.StatusCode)
+	}
+}
+
+func TestListInstances(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+	createResource(t, h, "publisher", "publisher", "publishers", nil, map[string]any{
+		"name": map[string]any{"type": "string"},
+	})
+	doRequest(t, h, "POST", "/publishers?id=acme", `{"name":"Acme"}`)
+	doRequest(t, h, "POST", "/publishers?id=beta", `{"name":"Beta"}`)
+
+	resp := doRequest(t, h, "GET", "/publishers", "")
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	m := readJSON(t, resp)
+	results := m["results"].([]any)
+	if len(results) != 2 {
+		t.Errorf("expected 2 results, got %d", len(results))
+	}
+}
+
+// --- Parent/Child Tests ---
+
+func setupPublisherAndBook(t *testing.T, h http.Handler) {
+	t.Helper()
+	createResource(t, h, "publisher", "publisher", "publishers", nil, map[string]any{
+		"name": map[string]any{"type": "string"},
+	})
+	createResource(t, h, "book", "book", "books", []string{"publisher"}, map[string]any{
+		"title":      map[string]any{"type": "string"},
+		"page_count": map[string]any{"type": "integer"},
+	})
+	doRequest(t, h, "POST", "/publishers?id=acme", `{"name":"Acme"}`)
+	doRequest(t, h, "POST", "/publishers?id=beta", `{"name":"Beta"}`)
+}
+
+func TestCreateChildInstance(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+	setupPublisherAndBook(t, h)
+
+	resp := doRequest(t, h, "POST", "/publishers/acme/books?id=go-guide", `{"title":"The Go Guide","page_count":350}`)
+	if resp.StatusCode != 200 {
+		m := readJSON(t, resp)
+		t.Fatalf("expected 200, got %d: %v", resp.StatusCode, m)
+	}
+	m := readJSON(t, resp)
+	if m["path"] != "publishers/acme/books/go-guide" {
+		t.Errorf("expected path=publishers/acme/books/go-guide, got %v", m["path"])
+	}
+	if m["title"] != "The Go Guide" {
+		t.Errorf("expected title=The Go Guide, got %v", m["title"])
+	}
+}
+
+func TestGetChildInstance(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+	setupPublisherAndBook(t, h)
+	doRequest(t, h, "POST", "/publishers/acme/books?id=go-guide", `{"title":"The Go Guide","page_count":350}`)
+
+	resp := doRequest(t, h, "GET", "/publishers/acme/books/go-guide", "")
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	m := readJSON(t, resp)
+	if m["title"] != "The Go Guide" {
+		t.Errorf("expected title=The Go Guide, got %v", m["title"])
+	}
+}
+
+func TestListChildrenScopedToParent(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+	setupPublisherAndBook(t, h)
+	doRequest(t, h, "POST", "/publishers/acme/books?id=book1", `{"title":"Book One","page_count":100}`)
+	doRequest(t, h, "POST", "/publishers/acme/books?id=book2", `{"title":"Book Two","page_count":200}`)
+	doRequest(t, h, "POST", "/publishers/beta/books?id=book3", `{"title":"Book Three","page_count":300}`)
+
+	// List books under acme — should only return 2.
+	resp := doRequest(t, h, "GET", "/publishers/acme/books", "")
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	m := readJSON(t, resp)
+	results := m["results"].([]any)
+	if len(results) != 2 {
+		t.Errorf("expected 2 books under acme, got %d", len(results))
+	}
+
+	// List books under beta — should only return 1.
+	resp = doRequest(t, h, "GET", "/publishers/beta/books", "")
+	m = readJSON(t, resp)
+	results = m["results"].([]any)
+	if len(results) != 1 {
+		t.Errorf("expected 1 book under beta, got %d", len(results))
+	}
+}
+
+// --- Pagination Tests ---
+
+func TestListPagination(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+	createResource(t, h, "publisher", "publisher", "publishers", nil, map[string]any{
+		"name": map[string]any{"type": "string"},
+	})
+	for i := 0; i < 5; i++ {
+		id := fmt.Sprintf("pub%02d", i)
+		doRequest(t, h, "POST", fmt.Sprintf("/publishers?id=%s", id), fmt.Sprintf(`{"name":"Publisher %d"}`, i))
+	}
+
+	// First page: 2 items.
+	resp := doRequest(t, h, "GET", "/publishers?max_page_size=2", "")
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	m := readJSON(t, resp)
+	results := m["results"].([]any)
+	if len(results) != 2 {
+		t.Errorf("expected 2 results on first page, got %d", len(results))
+	}
+	nextToken, ok := m["next_page_token"].(string)
+	if !ok || nextToken == "" {
+		t.Fatal("expected next_page_token on first page")
+	}
+
+	// Second page.
+	resp = doRequest(t, h, "GET", fmt.Sprintf("/publishers?max_page_size=2&page_token=%s", nextToken), "")
+	m = readJSON(t, resp)
+	results = m["results"].([]any)
+	if len(results) != 2 {
+		t.Errorf("expected 2 results on second page, got %d", len(results))
+	}
+	nextToken2, ok := m["next_page_token"].(string)
+	if !ok || nextToken2 == "" {
+		t.Fatal("expected next_page_token on second page")
+	}
+
+	// Third page: 1 item, no next token.
+	resp = doRequest(t, h, "GET", fmt.Sprintf("/publishers?max_page_size=2&page_token=%s", nextToken2), "")
+	m = readJSON(t, resp)
+	results = m["results"].([]any)
+	if len(results) != 1 {
+		t.Errorf("expected 1 result on third page, got %d", len(results))
+	}
+	if _, ok := m["next_page_token"]; ok {
+		t.Error("expected no next_page_token on last page")
+	}
+}
+
+// --- OpenAPI Tests ---
+
+func TestOpenAPIEmpty(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+	resp := doRequest(t, h, "GET", "/openapi.json", "")
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	m := readJSON(t, resp)
+	if m["openapi"] != "3.1.0" {
+		t.Errorf("expected openapi=3.1.0, got %v", m["openapi"])
+	}
+}
+
+func TestOpenAPIAfterCreate(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+	createResource(t, h, "publisher", "publisher", "publishers", nil, map[string]any{
+		"name": map[string]any{"type": "string"},
+	})
+	resp := doRequest(t, h, "GET", "/openapi.json", "")
+	m := readJSON(t, resp)
+	paths := m["paths"].(map[string]any)
+	if _, ok := paths["/publishers"]; !ok {
+		t.Error("expected /publishers path in OpenAPI spec")
+	}
+	if _, ok := paths["/publishers/{publisher}"]; !ok {
+		t.Error("expected /publishers/{publisher} path in OpenAPI spec")
+	}
+}
+
+func TestOpenAPIAfterDelete(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+	createResource(t, h, "publisher", "publisher", "publishers", nil, map[string]any{
+		"name": map[string]any{"type": "string"},
+	})
+	doRequest(t, h, "DELETE", "/resources/publisher", "")
+
+	resp := doRequest(t, h, "GET", "/openapi.json", "")
+	m := readJSON(t, resp)
+	paths, ok := m["paths"].(map[string]any)
+	if ok && len(paths) > 0 {
+		t.Errorf("expected no paths after deleting resource, got %v", paths)
+	}
+}
+
+func TestOpenAPIParentChild(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+	createResource(t, h, "publisher", "publisher", "publishers", nil, map[string]any{
+		"name": map[string]any{"type": "string"},
+	})
+	createResource(t, h, "book", "book", "books", []string{"publisher"}, map[string]any{
+		"title": map[string]any{"type": "string"},
+	})
+	resp := doRequest(t, h, "GET", "/openapi.json", "")
+	m := readJSON(t, resp)
+	paths := m["paths"].(map[string]any)
+	expected := []string{
+		"/publishers",
+		"/publishers/{publisher}",
+		"/publishers/{publisher}/books",
+		"/publishers/{publisher}/books/{book}",
+	}
+	for _, p := range expected {
+		if _, ok := paths[p]; !ok {
+			t.Errorf("expected path %s in OpenAPI spec", p)
+		}
+	}
+}
+
+// --- Restart Recovery Test ---
+
+func TestRestartRecovery(t *testing.T) {
+	dbPath := t.TempDir() + "/shared.db"
+
+	// Phase 1: Create resources and data.
+	d1, err := db.Init(dbPath)
+	if err != nil {
+		t.Fatalf("db.Init: %v", err)
+	}
+	state1 := apistate.NewState(d1, "http://localhost:8080")
+	h1 := state1.Handler()
+	createResource(t, h1, "publisher", "publisher", "publishers", nil, map[string]any{
+		"name": map[string]any{"type": "string"},
+	})
+	doRequest(t, h1, "POST", "/publishers?id=acme", `{"name":"Acme"}`)
+	d1.Close()
+
+	// Phase 2: Reopen and recover (simulates restart).
+	d2, err := db.Init(dbPath)
+	if err != nil {
+		t.Fatalf("db.Init (reopen): %v", err)
+	}
+	defer d2.Close()
+
+	state2 := apistate.NewState(d2, "http://localhost:8080")
+	defs, err := meta.LoadAll(d2)
+	if err != nil {
+		t.Fatalf("meta.LoadAll: %v", err)
+	}
+	if len(defs) != 1 {
+		t.Fatalf("expected 1 definition, got %d", len(defs))
+	}
+	for _, def := range defs {
+		if err := state2.AddResource(def); err != nil {
+			t.Fatalf("AddResource on recovery: %v", err)
+		}
+	}
+
+	h2 := state2.Handler()
+
+	// Verify data survived.
+	resp := doRequest(t, h2, "GET", "/publishers/acme", "")
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200 after recovery, got %d", resp.StatusCode)
+	}
+	m := readJSON(t, resp)
+	if m["name"] != "Acme" {
+		t.Errorf("expected name=Acme after recovery, got %v", m["name"])
+	}
+
+	// OpenAPI should also be restored.
+	resp = doRequest(t, h2, "GET", "/openapi.json", "")
+	spec := readJSON(t, resp)
+	paths := spec["paths"].(map[string]any)
+	if _, ok := paths["/publishers"]; !ok {
+		t.Error("expected /publishers path after recovery")
+	}
+}
