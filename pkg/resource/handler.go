@@ -70,6 +70,10 @@ func makeCreateHandler(d *sql.DB, r *api.Resource) http.HandlerFunc {
 		}
 
 		if err := Insert(d, r.Plural, stored, parentIDs, r.Schema); err != nil {
+			if isUniqueConstraintError(err) {
+				writeError(w, http.StatusConflict, fmt.Sprintf("resource %q already exists", path))
+				return
+			}
 			writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to create resource: %v", err))
 			return
 		}
@@ -269,6 +273,10 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 func generateID() string {
 	// Simple short ID based on timestamp + random suffix.
 	return fmt.Sprintf("%x", time.Now().UnixNano())
+}
+
+func isUniqueConstraintError(err error) bool {
+	return strings.Contains(err.Error(), "UNIQUE constraint failed")
 }
 
 func columnsFromSchema(schema *openapi.Schema) []db.ColumnDef {

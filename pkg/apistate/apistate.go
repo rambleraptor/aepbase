@@ -2,6 +2,7 @@ package apistate
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"sync"
@@ -232,8 +233,45 @@ func (s *State) serveOpenAPI(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	// Post-process to add "type" field to x-aep-resource (required by linter, not yet in aep-lib-go).
+	jsonBytes, err = injectResourceTypes(jsonBytes, a.Name)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(jsonBytes)
+}
+
+func injectResourceTypes(data []byte, apiName string) ([]byte, error) {
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return nil, err
+	}
+	components, ok := doc["components"].(map[string]any)
+	if !ok {
+		return data, nil
+	}
+	schemas, ok := components["schemas"].(map[string]any)
+	if !ok {
+		return data, nil
+	}
+	for name, s := range schemas {
+		schema, ok := s.(map[string]any)
+		if !ok {
+			continue
+		}
+		xaep, ok := schema["x-aep-resource"].(map[string]any)
+		if !ok {
+			continue
+		}
+		if _, hasType := xaep["type"]; !hasType {
+			xaep["type"] = apiName + "/" + name
+		}
+	}
+	return json.MarshalIndent(doc, "", "  ")
 }
 
 func buildPatternElems(def meta.ResourceDefinition, resources map[string]*api.Resource) []string {
