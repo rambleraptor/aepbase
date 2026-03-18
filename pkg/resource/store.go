@@ -74,7 +74,7 @@ func Get(d *sql.DB, plural string, path string, schema *openapi.Schema) (*Stored
 	return r, nil
 }
 
-func List(d *sql.DB, plural string, parentIDs map[string]string, schema *openapi.Schema, pageSize int, pageToken string) ([]StoredResource, string, error) {
+func List(d *sql.DB, plural string, parentIDs map[string]string, schema *openapi.Schema, pageSize int, pageToken string, skip int, filter string) ([]StoredResource, string, error) {
 	tableName := db.SanitizeTableName(plural)
 	propNames := schemaPropertyNames(schema)
 	selectCols := append([]string{"id", "path", "create_time", "update_time"}, propNames...)
@@ -95,15 +95,25 @@ func List(d *sql.DB, plural string, parentIDs map[string]string, schema *openapi
 		}
 	}
 
+	// Simple filter support: "field=value" expressions joined by " AND ".
+	if filter != "" {
+		filterClauses := parseFilter(filter, schema)
+		for _, fc := range filterClauses {
+			whereClauses = append(whereClauses, fmt.Sprintf("%s = ?", fc.column))
+			args = append(args, fc.value)
+		}
+	}
+
 	where := ""
 	if len(whereClauses) > 0 {
 		where = " WHERE " + strings.Join(whereClauses, " AND ")
 	}
 
-	// Fetch one extra to determine if there's a next page.
+	// Fetch enough to handle skip + page + one extra for next-page detection.
+	fetchCount := skip + pageSize + 1
 	query := fmt.Sprintf("SELECT %s FROM %s%s ORDER BY id LIMIT ?",
 		strings.Join(selectCols, ", "), tableName, where)
-	args = append(args, pageSize+1)
+	args = append(args, fetchCount)
 
 	rows, err := d.Query(query, args...)
 	if err != nil {
@@ -133,6 +143,13 @@ func List(d *sql.DB, plural string, parentIDs map[string]string, schema *openapi
 		results = append(results, r)
 	}
 
+	// Apply skip: drop the first N results.
+	if skip > 0 && skip < len(results) {
+		results = results[skip:]
+	} else if skip >= len(results) {
+		return []StoredResource{}, "", nil
+	}
+
 	nextPageToken := ""
 	if len(results) > pageSize {
 		lastID := results[pageSize-1].ID
@@ -141,6 +158,39 @@ func List(d *sql.DB, plural string, parentIDs map[string]string, schema *openapi
 	}
 
 	return results, nextPageToken, nil
+}
+
+// filterClause represents a single parsed filter condition.
+type filterClause struct {
+	column string
+	value  string
+}
+
+// parseFilter parses a simple filter string of "field=value" expressions joined by " AND ".
+// Only fields that exist in the schema (and are not standard fields) are accepted.
+func parseFilter(filter string, schema *openapi.Schema) []filterClause {
+	var clauses []filterClause
+	parts := strings.Split(filter, " AND ")
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		eqIdx := strings.Index(part, "=")
+		if eqIdx < 0 {
+			continue
+		}
+		field := strings.TrimSpace(part[:eqIdx])
+		value := strings.TrimSpace(part[eqIdx+1:])
+		// Strip surrounding quotes if present.
+		if len(value) >= 2 && value[0] == '\'' && value[len(value)-1] == '\'' {
+			value = value[1 : len(value)-1]
+		} else if len(value) >= 2 && value[0] == '"' && value[len(value)-1] == '"' {
+			value = value[1 : len(value)-1]
+		}
+		// Only allow filtering on known schema properties.
+		if _, ok := schema.Properties[field]; ok && !standardFields[field] {
+			clauses = append(clauses, filterClause{column: field, value: value})
+		}
+	}
+	return clauses
 }
 
 func Update(d *sql.DB, plural string, path string, fields map[string]any, updateTime string, schema *openapi.Schema) error {

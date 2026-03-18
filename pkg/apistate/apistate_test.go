@@ -994,3 +994,496 @@ func keys(m map[string]any) []string {
 	}
 	return ks
 }
+
+// --- Apply Method Tests ---
+
+func TestApplyCreatesNewResource(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+	createResource(t, h, "publisher", "publisher", "publishers", nil, map[string]any{
+		"name": map[string]any{"type": "string"},
+	})
+
+	// Apply (PUT) to a resource that doesn't exist yet — should create it.
+	resp := doRequest(t, h, "PUT", "/publishers/acme", `{"name":"Acme"}`)
+	if resp.StatusCode != 200 {
+		m := readJSON(t, resp)
+		t.Fatalf("expected 200, got %d: %v", resp.StatusCode, m)
+	}
+	m := readJSON(t, resp)
+	if m["id"] != "acme" {
+		t.Errorf("expected id=acme, got %v", m["id"])
+	}
+	if m["name"] != "Acme" {
+		t.Errorf("expected name=Acme, got %v", m["name"])
+	}
+
+	// Verify it can be retrieved.
+	resp = doRequest(t, h, "GET", "/publishers/acme", "")
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200 on GET, got %d", resp.StatusCode)
+	}
+}
+
+func TestApplyReplacesExistingResource(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+	createResource(t, h, "publisher", "publisher", "publishers", nil, map[string]any{
+		"name":     map[string]any{"type": "string"},
+		"location": map[string]any{"type": "string"},
+	})
+	doRequest(t, h, "POST", "/publishers?id=acme", `{"name":"Acme","location":"NYC"}`)
+
+	// Apply (PUT) replaces the entire resource.
+	resp := doRequest(t, h, "PUT", "/publishers/acme", `{"name":"Acme Corp"}`)
+	if resp.StatusCode != 200 {
+		m := readJSON(t, resp)
+		t.Fatalf("expected 200, got %d: %v", resp.StatusCode, m)
+	}
+	m := readJSON(t, resp)
+	if m["name"] != "Acme Corp" {
+		t.Errorf("expected name=Acme Corp, got %v", m["name"])
+	}
+	// location should be nil/empty since Apply is a full replace, not a merge.
+	if m["location"] != nil {
+		t.Errorf("expected location=nil after full replace, got %v", m["location"])
+	}
+}
+
+func TestApplyOnChildResource(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+	setupPublisherAndBook(t, h)
+
+	// Apply a book that doesn't exist yet.
+	resp := doRequest(t, h, "PUT", "/publishers/acme/books/go-guide", `{"title":"The Go Guide","page_count":350}`)
+	if resp.StatusCode != 200 {
+		m := readJSON(t, resp)
+		t.Fatalf("expected 200, got %d: %v", resp.StatusCode, m)
+	}
+	m := readJSON(t, resp)
+	if m["path"] != "publishers/acme/books/go-guide" {
+		t.Errorf("expected path=publishers/acme/books/go-guide, got %v", m["path"])
+	}
+}
+
+func TestApplyAppearsInOpenAPI(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+	createResource(t, h, "publisher", "publisher", "publishers", nil, map[string]any{
+		"name": map[string]any{"type": "string"},
+	})
+	resp := doRequest(t, h, "GET", "/openapi.json", "")
+	m := readJSON(t, resp)
+	paths := m["paths"].(map[string]any)
+	resourcePath := paths["/publishers/{publisher_id}"].(map[string]any)
+	if _, ok := resourcePath["put"]; !ok {
+		t.Error("expected PUT (Apply) operation in OpenAPI spec for /publishers/{publisher_id}")
+	}
+}
+
+// --- Required Field Enforcement Tests ---
+
+func TestCreateRejectsWhenRequiredFieldMissing(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+	// Create a resource with required fields.
+	schema := map[string]any{
+		"properties": map[string]any{
+			"name":     map[string]any{"type": "string"},
+			"location": map[string]any{"type": "string"},
+		},
+		"required": []any{"name"},
+	}
+	body := map[string]any{
+		"singular": "publisher",
+		"plural":   "publishers",
+		"schema":   schema,
+	}
+	b, _ := json.Marshal(body)
+	resp := doRequest(t, h, "POST", "/resources?id=publisher", string(b))
+	if resp.StatusCode != 200 {
+		m := readJSON(t, resp)
+		t.Fatalf("createResource: status %d: %v", resp.StatusCode, m)
+	}
+
+	// Try creating without the required "name" field.
+	resp = doRequest(t, h, "POST", "/publishers?id=acme", `{"location":"NYC"}`)
+	if resp.StatusCode != 400 {
+		t.Errorf("expected 400 for missing required field, got %d", resp.StatusCode)
+	}
+	m := readJSON(t, resp)
+	errMsg := m["error"].(map[string]any)["message"].(string)
+	if !strings.Contains(errMsg, "name") {
+		t.Errorf("expected error to mention 'name', got: %s", errMsg)
+	}
+}
+
+func TestCreateSucceedsWhenRequiredFieldPresent(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+	schema := map[string]any{
+		"properties": map[string]any{
+			"name": map[string]any{"type": "string"},
+		},
+		"required": []any{"name"},
+	}
+	body := map[string]any{
+		"singular": "publisher",
+		"plural":   "publishers",
+		"schema":   schema,
+	}
+	b, _ := json.Marshal(body)
+	doRequest(t, h, "POST", "/resources?id=publisher", string(b))
+
+	resp := doRequest(t, h, "POST", "/publishers?id=acme", `{"name":"Acme"}`)
+	if resp.StatusCode != 200 {
+		m := readJSON(t, resp)
+		t.Fatalf("expected 200, got %d: %v", resp.StatusCode, m)
+	}
+}
+
+func TestApplyRejectsWhenRequiredFieldMissing(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+	schema := map[string]any{
+		"properties": map[string]any{
+			"name": map[string]any{"type": "string"},
+		},
+		"required": []any{"name"},
+	}
+	body := map[string]any{
+		"singular": "publisher",
+		"plural":   "publishers",
+		"schema":   schema,
+	}
+	b, _ := json.Marshal(body)
+	doRequest(t, h, "POST", "/resources?id=publisher", string(b))
+
+	resp := doRequest(t, h, "PUT", "/publishers/acme", `{}`)
+	if resp.StatusCode != 400 {
+		t.Errorf("expected 400 for missing required field on Apply, got %d", resp.StatusCode)
+	}
+}
+
+// --- Data Type Validation Tests ---
+
+func TestCreateRejectsWrongType(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+	createResource(t, h, "publisher", "publisher", "publishers", nil, map[string]any{
+		"name":       map[string]any{"type": "string"},
+		"book_count": map[string]any{"type": "integer"},
+		"active":     map[string]any{"type": "boolean"},
+	})
+
+	// String field with integer value.
+	resp := doRequest(t, h, "POST", "/publishers?id=acme", `{"name":123,"book_count":5,"active":true}`)
+	if resp.StatusCode != 400 {
+		t.Errorf("expected 400 for wrong type (string got number), got %d", resp.StatusCode)
+	}
+
+	// Integer field with string value.
+	resp = doRequest(t, h, "POST", "/publishers?id=acme", `{"name":"Acme","book_count":"five","active":true}`)
+	if resp.StatusCode != 400 {
+		t.Errorf("expected 400 for wrong type (integer got string), got %d", resp.StatusCode)
+	}
+
+	// Boolean field with string value.
+	resp = doRequest(t, h, "POST", "/publishers?id=acme", `{"name":"Acme","book_count":5,"active":"yes"}`)
+	if resp.StatusCode != 400 {
+		t.Errorf("expected 400 for wrong type (boolean got string), got %d", resp.StatusCode)
+	}
+}
+
+func TestCreateAcceptsCorrectTypes(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+	createResource(t, h, "publisher", "publisher", "publishers", nil, map[string]any{
+		"name":       map[string]any{"type": "string"},
+		"book_count": map[string]any{"type": "integer"},
+		"active":     map[string]any{"type": "boolean"},
+		"rating":     map[string]any{"type": "number"},
+	})
+
+	resp := doRequest(t, h, "POST", "/publishers?id=acme", `{"name":"Acme","book_count":5,"active":true,"rating":4.5}`)
+	if resp.StatusCode != 200 {
+		m := readJSON(t, resp)
+		t.Fatalf("expected 200, got %d: %v", resp.StatusCode, m)
+	}
+}
+
+func TestUpdateRejectsWrongType(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+	createResource(t, h, "publisher", "publisher", "publishers", nil, map[string]any{
+		"name": map[string]any{"type": "string"},
+	})
+	doRequest(t, h, "POST", "/publishers?id=acme", `{"name":"Acme"}`)
+
+	resp := doRequest(t, h, "PATCH", "/publishers/acme", `{"name":42}`)
+	if resp.StatusCode != 400 {
+		t.Errorf("expected 400 for wrong type on update, got %d", resp.StatusCode)
+	}
+}
+
+func TestCreateRejectsFloatForInteger(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+	createResource(t, h, "publisher", "publisher", "publishers", nil, map[string]any{
+		"book_count": map[string]any{"type": "integer"},
+	})
+
+	resp := doRequest(t, h, "POST", "/publishers?id=acme", `{"book_count":3.14}`)
+	if resp.StatusCode != 400 {
+		t.Errorf("expected 400 for float in integer field, got %d", resp.StatusCode)
+	}
+}
+
+// --- ReadOnly Field Enforcement Tests ---
+
+func TestCreateStripsReadOnlyFields(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+	// Create resource where "status" is read-only.
+	schema := map[string]any{
+		"properties": map[string]any{
+			"name":   map[string]any{"type": "string"},
+			"status": map[string]any{"type": "string", "readOnly": true},
+		},
+	}
+	body := map[string]any{
+		"singular": "publisher",
+		"plural":   "publishers",
+		"schema":   schema,
+	}
+	b, _ := json.Marshal(body)
+	doRequest(t, h, "POST", "/resources?id=publisher", string(b))
+
+	// Try creating with the read-only field — should be silently stripped.
+	resp := doRequest(t, h, "POST", "/publishers?id=acme", `{"name":"Acme","status":"active"}`)
+	if resp.StatusCode != 200 {
+		m := readJSON(t, resp)
+		t.Fatalf("expected 200, got %d: %v", resp.StatusCode, m)
+	}
+	m := readJSON(t, resp)
+	// status should not be set (or be nil).
+	if m["status"] != nil {
+		t.Errorf("expected status to be nil (read-only stripped), got %v", m["status"])
+	}
+}
+
+func TestUpdateStripsReadOnlyFields(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+	schema := map[string]any{
+		"properties": map[string]any{
+			"name":   map[string]any{"type": "string"},
+			"status": map[string]any{"type": "string", "readOnly": true},
+		},
+	}
+	body := map[string]any{
+		"singular": "publisher",
+		"plural":   "publishers",
+		"schema":   schema,
+	}
+	b, _ := json.Marshal(body)
+	doRequest(t, h, "POST", "/resources?id=publisher", string(b))
+
+	doRequest(t, h, "POST", "/publishers?id=acme", `{"name":"Acme"}`)
+
+	// Try updating with a read-only field.
+	resp := doRequest(t, h, "PATCH", "/publishers/acme", `{"name":"Acme Corp","status":"archived"}`)
+	if resp.StatusCode != 200 {
+		m := readJSON(t, resp)
+		t.Fatalf("expected 200, got %d: %v", resp.StatusCode, m)
+	}
+	m := readJSON(t, resp)
+	if m["name"] != "Acme Corp" {
+		t.Errorf("expected name=Acme Corp, got %v", m["name"])
+	}
+	// status should not have been updated.
+	if m["status"] != nil {
+		t.Errorf("expected status to remain nil (read-only stripped), got %v", m["status"])
+	}
+}
+
+// --- List Method Options Tests ---
+
+func TestListWithFilter(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+	createResource(t, h, "publisher", "publisher", "publishers", nil, map[string]any{
+		"name":     map[string]any{"type": "string"},
+		"location": map[string]any{"type": "string"},
+	})
+	doRequest(t, h, "POST", "/publishers?id=acme", `{"name":"Acme","location":"NYC"}`)
+	doRequest(t, h, "POST", "/publishers?id=beta", `{"name":"Beta","location":"LA"}`)
+	doRequest(t, h, "POST", "/publishers?id=gamma", `{"name":"Gamma","location":"NYC"}`)
+
+	// Filter by location=NYC.
+	resp := doRequest(t, h, "GET", "/publishers?filter=location%3D'NYC'", "")
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	m := readJSON(t, resp)
+	results := m["results"].([]any)
+	if len(results) != 2 {
+		t.Errorf("expected 2 results for filter location=NYC, got %d", len(results))
+	}
+}
+
+func TestListWithSkip(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+	createResource(t, h, "publisher", "publisher", "publishers", nil, map[string]any{
+		"name": map[string]any{"type": "string"},
+	})
+	for i := 0; i < 5; i++ {
+		id := fmt.Sprintf("pub%02d", i)
+		doRequest(t, h, "POST", fmt.Sprintf("/publishers?id=%s", id), fmt.Sprintf(`{"name":"Publisher %d"}`, i))
+	}
+
+	// Skip first 3 results.
+	resp := doRequest(t, h, "GET", "/publishers?skip=3", "")
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	m := readJSON(t, resp)
+	results := m["results"].([]any)
+	if len(results) != 2 {
+		t.Errorf("expected 2 results after skipping 3 of 5, got %d", len(results))
+	}
+}
+
+func TestListFilterAppearsInOpenAPI(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+	createResource(t, h, "publisher", "publisher", "publishers", nil, map[string]any{
+		"name": map[string]any{"type": "string"},
+	})
+	resp := doRequest(t, h, "GET", "/openapi.json", "")
+	m := readJSON(t, resp)
+	paths := m["paths"].(map[string]any)
+	listPath := paths["/publishers"].(map[string]any)
+	getOp := listPath["get"].(map[string]any)
+	params := getOp["parameters"].([]any)
+	foundFilter := false
+	foundSkip := false
+	for _, p := range params {
+		param := p.(map[string]any)
+		if param["name"] == "filter" {
+			foundFilter = true
+		}
+		if param["name"] == "skip" {
+			foundSkip = true
+		}
+	}
+	if !foundFilter {
+		t.Error("expected 'filter' parameter in OpenAPI list operation")
+	}
+	if !foundSkip {
+		t.Error("expected 'skip' parameter in OpenAPI list operation")
+	}
+}
+
+// --- Parent-Child Relationship Depth Tests ---
+
+func TestGrandchildResources(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+	// Create 3-level hierarchy: publisher -> book -> chapter.
+	createResource(t, h, "publisher", "publisher", "publishers", nil, map[string]any{
+		"name": map[string]any{"type": "string"},
+	})
+	createResource(t, h, "book", "book", "books", []string{"publisher"}, map[string]any{
+		"title": map[string]any{"type": "string"},
+	})
+	createResource(t, h, "chapter", "chapter", "chapters", []string{"book"}, map[string]any{
+		"heading": map[string]any{"type": "string"},
+	})
+
+	// Create instances at each level.
+	doRequest(t, h, "POST", "/publishers?id=acme", `{"name":"Acme"}`)
+	doRequest(t, h, "POST", "/publishers/acme/books?id=go-guide", `{"title":"The Go Guide"}`)
+	resp := doRequest(t, h, "POST", "/publishers/acme/books/go-guide/chapters?id=ch1", `{"heading":"Getting Started"}`)
+	if resp.StatusCode != 200 {
+		m := readJSON(t, resp)
+		t.Fatalf("expected 200, got %d: %v", resp.StatusCode, m)
+	}
+	m := readJSON(t, resp)
+	if m["path"] != "publishers/acme/books/go-guide/chapters/ch1" {
+		t.Errorf("expected full path for grandchild, got %v", m["path"])
+	}
+
+	// Get the grandchild.
+	resp = doRequest(t, h, "GET", "/publishers/acme/books/go-guide/chapters/ch1", "")
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200 on GET grandchild, got %d", resp.StatusCode)
+	}
+	m = readJSON(t, resp)
+	if m["heading"] != "Getting Started" {
+		t.Errorf("expected heading=Getting Started, got %v", m["heading"])
+	}
+}
+
+func TestGrandchildOpenAPIPaths(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+	createResource(t, h, "publisher", "publisher", "publishers", nil, map[string]any{
+		"name": map[string]any{"type": "string"},
+	})
+	createResource(t, h, "book", "book", "books", []string{"publisher"}, map[string]any{
+		"title": map[string]any{"type": "string"},
+	})
+	createResource(t, h, "chapter", "chapter", "chapters", []string{"book"}, map[string]any{
+		"heading": map[string]any{"type": "string"},
+	})
+
+	resp := doRequest(t, h, "GET", "/openapi.json", "")
+	m := readJSON(t, resp)
+	paths := m["paths"].(map[string]any)
+	expected := []string{
+		"/publishers/{publisher_id}/books/{book_id}/chapters",
+		"/publishers/{publisher_id}/books/{book_id}/chapters/{chapter_id}",
+	}
+	for _, p := range expected {
+		if _, ok := paths[p]; !ok {
+			t.Errorf("expected path %s in OpenAPI spec, got paths: %v", p, keys(paths))
+		}
+	}
+}
+
+func TestDeleteResourceWithGrandchildren(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+	createResource(t, h, "publisher", "publisher", "publishers", nil, map[string]any{
+		"name": map[string]any{"type": "string"},
+	})
+	createResource(t, h, "book", "book", "books", []string{"publisher"}, map[string]any{
+		"title": map[string]any{"type": "string"},
+	})
+	createResource(t, h, "chapter", "chapter", "chapters", []string{"book"}, map[string]any{
+		"heading": map[string]any{"type": "string"},
+	})
+
+	// Cannot delete book because chapter depends on it.
+	resp := doRequest(t, h, "DELETE", "/resources/book", "")
+	if resp.StatusCode != 400 {
+		t.Errorf("expected 400 (has children), got %d", resp.StatusCode)
+	}
+
+	// Delete chapter first, then book, then publisher.
+	resp = doRequest(t, h, "DELETE", "/resources/chapter", "")
+	if resp.StatusCode != 204 {
+		t.Errorf("expected 204 deleting chapter, got %d", resp.StatusCode)
+	}
+	resp = doRequest(t, h, "DELETE", "/resources/book", "")
+	if resp.StatusCode != 204 {
+		t.Errorf("expected 204 deleting book, got %d", resp.StatusCode)
+	}
+	resp = doRequest(t, h, "DELETE", "/resources/publisher", "")
+	if resp.StatusCode != 204 {
+		t.Errorf("expected 204 deleting publisher, got %d", resp.StatusCode)
+	}
+}

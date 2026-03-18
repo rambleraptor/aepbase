@@ -36,6 +36,7 @@ func RegisterRoutes(mux *http.ServeMux, d *sql.DB, r *api.Resource, customMethod
 	mux.HandleFunc("GET "+resourcePath, makeGetOrCustomHandler(d, r, customMethods, idParam))
 	mux.HandleFunc("POST "+resourcePath, makePostCustomHandler(r, customMethods, idParam))
 	mux.HandleFunc("PATCH "+resourcePath, makeUpdateHandler(d, r, idParam))
+	mux.HandleFunc("PUT "+resourcePath, makeApplyHandler(d, r, idParam))
 	mux.HandleFunc("DELETE "+resourcePath, makeDeleteHandler(d, r, idParam))
 }
 
@@ -113,10 +114,11 @@ func makeCreateHandler(d *sql.DB, r *api.Resource) http.HandlerFunc {
 		}
 
 		// Extract parent IDs from path.
-		parentIDs := extractParentIDs(req, r)
+		allParentIDs := extractParentIDs(req, r)
+		directParentIDs := extractDirectParentIDs(allParentIDs, r)
 
 		// Build the AEP path.
-		path := buildResourcePath(r, parentIDs, id)
+		path := buildResourcePath(r, allParentIDs, id)
 		now := time.Now().UTC().Format(time.RFC3339)
 
 		// Remove standard fields from user data — they are managed by us.
@@ -124,6 +126,21 @@ func makeCreateHandler(d *sql.DB, r *api.Resource) http.HandlerFunc {
 		delete(fields, "path")
 		delete(fields, "create_time")
 		delete(fields, "update_time")
+
+		// Strip read-only fields — clients may not set them.
+		stripReadOnlyFields(r.Schema, fields)
+
+		// Validate required fields.
+		if err := validateRequired(r.Schema, fields); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
+		// Validate field types.
+		if err := validateTypes(r.Schema, fields); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 
 		stored := &StoredResource{
 			ID:         id,
@@ -133,7 +150,7 @@ func makeCreateHandler(d *sql.DB, r *api.Resource) http.HandlerFunc {
 			Fields:     fields,
 		}
 
-		if err := Insert(d, r.Plural, stored, parentIDs, r.Schema); err != nil {
+		if err := Insert(d, r.Plural, stored, directParentIDs, r.Schema); err != nil {
 			if isUniqueConstraintError(err) {
 				writeError(w, http.StatusConflict, fmt.Sprintf("resource %q already exists", path))
 				return
@@ -168,7 +185,8 @@ func makeGetHandler(d *sql.DB, r *api.Resource, idParam string) http.HandlerFunc
 
 func makeListHandler(d *sql.DB, r *api.Resource) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
-		parentIDs := extractParentIDs(req, r)
+		allParentIDs := extractParentIDs(req, r)
+		parentIDs := extractDirectParentIDs(allParentIDs, r)
 
 		pageSize := 50
 		if ps := req.URL.Query().Get("max_page_size"); ps != "" {
@@ -181,7 +199,23 @@ func makeListHandler(d *sql.DB, r *api.Resource) http.HandlerFunc {
 		}
 		pageToken := req.URL.Query().Get("page_token")
 
-		results, nextPageToken, err := List(d, r.Plural, parentIDs, r.Schema, pageSize, pageToken)
+		// Skip support: skip N results before returning.
+		skip := 0
+		if r.Methods.List != nil && r.Methods.List.SupportsSkip {
+			if s := req.URL.Query().Get("skip"); s != "" {
+				if n, err := strconv.Atoi(s); err == nil && n > 0 {
+					skip = n
+				}
+			}
+		}
+
+		// Filter support: simple field=value filtering.
+		filter := ""
+		if r.Methods.List != nil && r.Methods.List.SupportsFilter {
+			filter = req.URL.Query().Get("filter")
+		}
+
+		results, nextPageToken, err := List(d, r.Plural, parentIDs, r.Schema, pageSize, pageToken, skip, filter)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, fmt.Sprintf("database error: %v", err))
 			return
@@ -238,6 +272,15 @@ func makeUpdateHandler(d *sql.DB, r *api.Resource, idParam string) http.HandlerF
 		delete(patch, "create_time")
 		delete(patch, "update_time")
 
+		// Strip read-only fields — clients may not update them.
+		stripReadOnlyFields(r.Schema, patch)
+
+		// Validate field types on the patch values.
+		if err := validateTypes(r.Schema, patch); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
 		// Merge patch onto existing fields.
 		for k, v := range patch {
 			existing.Fields[k] = v
@@ -252,6 +295,86 @@ func makeUpdateHandler(d *sql.DB, r *api.Resource, idParam string) http.HandlerF
 		}
 
 		writeResourceJSON(w, http.StatusOK, existing, r.Schema)
+	}
+}
+
+// makeApplyHandler returns a handler for the Apply (PUT) method.
+// Apply is a declarative create-or-update: if the resource exists it replaces it fully,
+// if it doesn't exist it creates it.
+func makeApplyHandler(d *sql.DB, r *api.Resource, idParam string) http.HandlerFunc {
+	return func(w http.ResponseWriter, req *http.Request) {
+		allParentIDs := extractParentIDs(req, r)
+		directParentIDs := extractDirectParentIDs(allParentIDs, r)
+		id := req.PathValue(idParam)
+		path := buildResourcePath(r, allParentIDs, id)
+
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+
+		var fields map[string]any
+		if err := json.Unmarshal(body, &fields); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid JSON")
+			return
+		}
+
+		// Remove standard fields — managed by us.
+		delete(fields, "id")
+		delete(fields, "path")
+		delete(fields, "create_time")
+		delete(fields, "update_time")
+
+		// Strip read-only fields.
+		stripReadOnlyFields(r.Schema, fields)
+
+		// Validate required fields.
+		if err := validateRequired(r.Schema, fields); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
+		// Validate field types.
+		if err := validateTypes(r.Schema, fields); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
+		now := time.Now().UTC().Format(time.RFC3339)
+
+		// Check if the resource already exists.
+		existing, err := Get(d, r.Plural, path, r.Schema)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("database error: %v", err))
+			return
+		}
+
+		if existing != nil {
+			// Replace: update all fields (full replacement, not merge).
+			existing.Fields = fields
+			existing.UpdateTime = now
+
+			if err := Update(d, r.Plural, path, existing.Fields, now, r.Schema); err != nil {
+				writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to update resource: %v", err))
+				return
+			}
+			writeResourceJSON(w, http.StatusOK, existing, r.Schema)
+		} else {
+			// Create new resource.
+			stored := &StoredResource{
+				ID:         id,
+				Path:       path,
+				CreateTime: now,
+				UpdateTime: now,
+				Fields:     fields,
+			}
+			if err := Insert(d, r.Plural, stored, directParentIDs, r.Schema); err != nil {
+				writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to create resource: %v", err))
+				return
+			}
+			writeResourceJSON(w, http.StatusOK, stored, r.Schema)
+		}
 	}
 }
 
@@ -275,7 +398,7 @@ func makeDeleteHandler(d *sql.DB, r *api.Resource, idParam string) http.HandlerF
 	}
 }
 
-// extractParentIDs pulls parent IDs from the URL path values.
+// extractParentIDs pulls ALL ancestor IDs from the URL path values.
 // PatternElems: ["publishers", "{publisher_id}", "books", "{book_id}"]
 // Parents are at odd indices before the last two elements.
 func extractParentIDs(req *http.Request, r *api.Resource) map[string]string {
@@ -287,6 +410,19 @@ func extractParentIDs(req *http.Request, r *api.Resource) map[string]string {
 		parentIDs[paramName] = req.PathValue(paramName)
 	}
 	return parentIDs
+}
+
+// extractDirectParentIDs returns only the direct parent IDs (not grandparents).
+// These correspond to the actual foreign key columns in the DB table.
+func extractDirectParentIDs(allParentIDs map[string]string, r *api.Resource) map[string]string {
+	directIDs := make(map[string]string)
+	for _, parentSingular := range r.Parents {
+		paramName := parentSingular + "_id"
+		if v, ok := allParentIDs[paramName]; ok {
+			directIDs[paramName] = v
+		}
+	}
+	return directIDs
 }
 
 // buildResourcePath constructs the AEP path like "publishers/pub1/books/book1".

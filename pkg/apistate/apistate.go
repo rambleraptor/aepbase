@@ -132,10 +132,11 @@ func (s *State) AddResource(def meta.ResourceDefinition) error {
 		Schema:   &schema,
 		Methods: api.Methods{
 			Get:    &api.GetMethod{},
-			List:   &api.ListMethod{},
+			List:   &api.ListMethod{SupportsFilter: true, SupportsSkip: true},
 			Create: &api.CreateMethod{SupportsUserSettableCreate: true},
 			Update: &api.UpdateMethod{},
 			Delete: &api.DeleteMethod{},
+			Apply:  &api.ApplyMethod{},
 		},
 	}
 	r.API = s.API
