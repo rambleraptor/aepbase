@@ -24,8 +24,8 @@ func Insert(d *sql.DB, plural string, r *StoredResource, parentIDs map[string]st
 	placeholders := []string{"?", "?", "?", "?"}
 	values := []any{r.ID, r.Path, r.CreateTime, r.UpdateTime}
 
-	for parentSingular, parentID := range parentIDs {
-		colNames = append(colNames, db.SanitizeTableName(parentSingular)+"_id")
+	for parentParam, parentID := range parentIDs {
+		colNames = append(colNames, db.SanitizeTableName(parentParam))
 		placeholders = append(placeholders, "?")
 		values = append(values, parentID)
 	}
@@ -82,8 +82,8 @@ func List(d *sql.DB, plural string, parentIDs map[string]string, schema *openapi
 	var whereClauses []string
 	var args []any
 
-	for parentSingular, parentID := range parentIDs {
-		whereClauses = append(whereClauses, fmt.Sprintf("%s_id = ?", db.SanitizeTableName(parentSingular)))
+	for parentParam, parentID := range parentIDs {
+		whereClauses = append(whereClauses, fmt.Sprintf("%s = ?", db.SanitizeTableName(parentParam)))
 		args = append(args, parentID)
 	}
 

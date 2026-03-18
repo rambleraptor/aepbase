@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/aep-dev/aep-lib-go/pkg/openapi"
 	"github.com/aep-dev/aepbase/pkg/apistate"
 	"github.com/aep-dev/aepbase/pkg/db"
 	"github.com/aep-dev/aepbase/pkg/meta"
@@ -638,8 +639,8 @@ func TestOpenAPIAfterCreate(t *testing.T) {
 	if _, ok := paths["/publishers"]; !ok {
 		t.Error("expected /publishers path in OpenAPI spec")
 	}
-	if _, ok := paths["/publishers/{publisher}"]; !ok {
-		t.Error("expected /publishers/{publisher} path in OpenAPI spec")
+	if _, ok := paths["/publishers/{publisher_id}"]; !ok {
+		t.Error("expected /publishers/{publisher_id} path in OpenAPI spec")
 	}
 }
 
@@ -654,8 +655,14 @@ func TestOpenAPIAfterDelete(t *testing.T) {
 	resp := doRequest(t, h, "GET", "/openapi.json", "")
 	m := readJSON(t, resp)
 	paths, ok := m["paths"].(map[string]any)
-	if ok && len(paths) > 0 {
-		t.Errorf("expected no paths after deleting resource, got %v", paths)
+	if !ok {
+		paths = map[string]any{}
+	}
+	// After deleting the user resource, only the built-in meta resource paths should remain.
+	for p := range paths {
+		if p != "/resources" && p != "/resources/{resource_id}" {
+			t.Errorf("unexpected path %q after deleting resource", p)
+		}
 	}
 }
 
@@ -673,9 +680,9 @@ func TestOpenAPIParentChild(t *testing.T) {
 	paths := m["paths"].(map[string]any)
 	expected := []string{
 		"/publishers",
-		"/publishers/{publisher}",
-		"/publishers/{publisher}/books",
-		"/publishers/{publisher}/books/{book}",
+		"/publishers/{publisher_id}",
+		"/publishers/{publisher_id}/books",
+		"/publishers/{publisher_id}/books/{book_id}",
 	}
 	for _, p := range expected {
 		if _, ok := paths[p]; !ok {
@@ -742,4 +749,248 @@ func TestRestartRecovery(t *testing.T) {
 	if _, ok := paths["/publishers"]; !ok {
 		t.Error("expected /publishers path after recovery")
 	}
+}
+
+// --- Custom Method Tests ---
+
+func TestCustomMethodPOST(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+	createResource(t, h, "publisher", "publisher", "publishers", nil, map[string]any{
+		"name":     map[string]any{"type": "string"},
+		"archived": map[string]any{"type": "boolean"},
+	})
+	doRequest(t, h, "POST", "/publishers?id=acme", `{"name":"Acme","archived":false}`)
+
+	err := state.AddCustomMethod("publisher", "archive", apistate.CustomMethodConfig{
+		Method:         "POST",
+		RequestSchema:  &openapi.Schema{Type: "object", Properties: openapi.Properties{}},
+		ResponseSchema: &openapi.Schema{Type: "object", Properties: openapi.Properties{"archived": {Type: "boolean"}}},
+		Handler: func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{"archived": true})
+		},
+	})
+	if err != nil {
+		t.Fatalf("AddCustomMethod: %v", err)
+	}
+
+	// Must re-get handler after mux rebuild.
+	h = state.Handler()
+
+	resp := doRequest(t, h, "POST", "/publishers/acme:archive", `{}`)
+	if resp.StatusCode != 200 {
+		m := readJSON(t, resp)
+		t.Fatalf("expected 200, got %d: %v", resp.StatusCode, m)
+	}
+	m := readJSON(t, resp)
+	if m["archived"] != true {
+		t.Errorf("expected archived=true, got %v", m["archived"])
+	}
+}
+
+func TestCustomMethodGET(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+	createResource(t, h, "publisher", "publisher", "publishers", nil, map[string]any{
+		"name": map[string]any{"type": "string"},
+	})
+	doRequest(t, h, "POST", "/publishers?id=acme", `{"name":"Acme"}`)
+
+	err := state.AddCustomMethod("publisher", "stats", apistate.CustomMethodConfig{
+		Method:         "GET",
+		ResponseSchema: &openapi.Schema{Type: "object", Properties: openapi.Properties{"book_count": {Type: "integer"}}},
+		Handler: func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{"book_count": 42})
+		},
+	})
+	if err != nil {
+		t.Fatalf("AddCustomMethod: %v", err)
+	}
+
+	h = state.Handler()
+
+	resp := doRequest(t, h, "GET", "/publishers/acme:stats", "")
+	if resp.StatusCode != 200 {
+		m := readJSON(t, resp)
+		t.Fatalf("expected 200, got %d: %v", resp.StatusCode, m)
+	}
+	m := readJSON(t, resp)
+	if m["book_count"] != float64(42) {
+		t.Errorf("expected book_count=42, got %v", m["book_count"])
+	}
+}
+
+func TestCustomMethodGETDoesNotBreakRegularGet(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+	createResource(t, h, "publisher", "publisher", "publishers", nil, map[string]any{
+		"name": map[string]any{"type": "string"},
+	})
+	doRequest(t, h, "POST", "/publishers?id=acme", `{"name":"Acme"}`)
+
+	err := state.AddCustomMethod("publisher", "stats", apistate.CustomMethodConfig{
+		Method:         "GET",
+		ResponseSchema: &openapi.Schema{Type: "object", Properties: openapi.Properties{"count": {Type: "integer"}}},
+		Handler: func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{"count": 1})
+		},
+	})
+	if err != nil {
+		t.Fatalf("AddCustomMethod: %v", err)
+	}
+
+	h = state.Handler()
+
+	// Regular GET should still work.
+	resp := doRequest(t, h, "GET", "/publishers/acme", "")
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200 for regular GET, got %d", resp.StatusCode)
+	}
+	m := readJSON(t, resp)
+	if m["name"] != "Acme" {
+		t.Errorf("expected name=Acme, got %v", m["name"])
+	}
+}
+
+func TestCustomMethodNotFound(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+	createResource(t, h, "publisher", "publisher", "publishers", nil, map[string]any{
+		"name": map[string]any{"type": "string"},
+	})
+
+	resp := doRequest(t, h, "POST", "/publishers/acme:nonexistent", `{}`)
+	if resp.StatusCode != 404 {
+		t.Errorf("expected 404, got %d", resp.StatusCode)
+	}
+}
+
+func TestCustomMethodAppearsInOpenAPI(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+	createResource(t, h, "publisher", "publisher", "publishers", nil, map[string]any{
+		"name": map[string]any{"type": "string"},
+	})
+
+	err := state.AddCustomMethod("publisher", "archive", apistate.CustomMethodConfig{
+		Method:         "POST",
+		RequestSchema:  &openapi.Schema{Type: "object", Properties: openapi.Properties{}},
+		ResponseSchema: &openapi.Schema{Type: "object", Properties: openapi.Properties{"archived": {Type: "boolean"}}},
+		Handler: func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(200)
+		},
+	})
+	if err != nil {
+		t.Fatalf("AddCustomMethod: %v", err)
+	}
+
+	h = state.Handler()
+
+	resp := doRequest(t, h, "GET", "/openapi.json", "")
+	m := readJSON(t, resp)
+	paths := m["paths"].(map[string]any)
+	cmPath, ok := paths["/publishers/{publisher_id}:archive"]
+	if !ok {
+		t.Fatalf("expected /publishers/{publisher_id}:archive path in OpenAPI spec, got paths: %v", keys(paths))
+	}
+	pathItem := cmPath.(map[string]any)
+	if _, ok := pathItem["post"]; !ok {
+		t.Error("expected POST operation on custom method path")
+	}
+}
+
+func TestCustomMethodOnChildResource(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+	setupPublisherAndBook(t, h)
+	doRequest(t, h, "POST", "/publishers/acme/books?id=go-guide", `{"title":"The Go Guide","page_count":350}`)
+
+	err := state.AddCustomMethod("book", "archive", apistate.CustomMethodConfig{
+		Method:         "POST",
+		RequestSchema:  &openapi.Schema{Type: "object"},
+		ResponseSchema: &openapi.Schema{Type: "object", Properties: openapi.Properties{"status": {Type: "string"}}},
+		Handler: func(w http.ResponseWriter, r *http.Request) {
+			bookID := r.PathValue("book_id")
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{"status": "archived", "book": bookID})
+		},
+	})
+	if err != nil {
+		t.Fatalf("AddCustomMethod: %v", err)
+	}
+
+	h = state.Handler()
+
+	resp := doRequest(t, h, "POST", "/publishers/acme/books/go-guide:archive", `{}`)
+	if resp.StatusCode != 200 {
+		m := readJSON(t, resp)
+		t.Fatalf("expected 200, got %d: %v", resp.StatusCode, m)
+	}
+	m := readJSON(t, resp)
+	if m["status"] != "archived" {
+		t.Errorf("expected status=archived, got %v", m["status"])
+	}
+	if m["book"] != "go-guide" {
+		t.Errorf("expected book=go-guide, got %v", m["book"])
+	}
+}
+
+func TestCustomMethodInvalidConfig(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+	createResource(t, h, "publisher", "publisher", "publishers", nil, map[string]any{
+		"name": map[string]any{"type": "string"},
+	})
+
+	// Missing handler.
+	err := state.AddCustomMethod("publisher", "archive", apistate.CustomMethodConfig{
+		Method:         "POST",
+		RequestSchema:  &openapi.Schema{Type: "object"},
+		ResponseSchema: &openapi.Schema{Type: "object"},
+	})
+	if err == nil {
+		t.Error("expected error for missing handler")
+	}
+
+	// Invalid HTTP method.
+	err = state.AddCustomMethod("publisher", "archive", apistate.CustomMethodConfig{
+		Method:         "PUT",
+		RequestSchema:  &openapi.Schema{Type: "object"},
+		ResponseSchema: &openapi.Schema{Type: "object"},
+		Handler:        func(w http.ResponseWriter, r *http.Request) {},
+	})
+	if err == nil {
+		t.Error("expected error for invalid HTTP method")
+	}
+
+	// Missing response schema.
+	err = state.AddCustomMethod("publisher", "archive", apistate.CustomMethodConfig{
+		Method:  "POST",
+		Handler: func(w http.ResponseWriter, r *http.Request) {},
+	})
+	if err == nil {
+		t.Error("expected error for missing response schema")
+	}
+
+	// Nonexistent resource — deferred, no error.
+	err = state.AddCustomMethod("nonexistent", "archive", apistate.CustomMethodConfig{
+		Method:         "POST",
+		RequestSchema:  &openapi.Schema{Type: "object"},
+		ResponseSchema: &openapi.Schema{Type: "object"},
+		Handler:        func(w http.ResponseWriter, r *http.Request) {},
+	})
+	if err != nil {
+		t.Errorf("expected deferred registration for nonexistent resource, got error: %v", err)
+	}
+}
+
+func keys(m map[string]any) []string {
+	var ks []string
+	for k := range m {
+		ks = append(ks, k)
+	}
+	return ks
 }

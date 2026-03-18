@@ -17,15 +17,79 @@ import (
 	"github.com/aep-dev/aepbase/pkg/db"
 )
 
-func RegisterRoutes(mux *http.ServeMux, d *sql.DB, r *api.Resource) {
-	collectionPath := "/" + strings.Join(r.PatternElems[:len(r.PatternElems)-1], "/")
-	resourcePath := "/" + strings.Join(r.PatternElems, "/")
+// CustomMethodHandler holds the handler and HTTP method for a custom method.
+type CustomMethodHandler struct {
+	Method  string // "POST" or "GET"
+	Handler http.HandlerFunc
+}
+
+func RegisterRoutes(mux *http.ServeMux, d *sql.DB, r *api.Resource, customMethods map[string]CustomMethodHandler) {
+	elems := r.PatternElems()
+	collectionPath := "/" + strings.Join(elems[:len(elems)-1], "/")
+	resourcePath := "/" + strings.Join(elems, "/")
+
+	// The last pattern element is the resource ID param, e.g. "{book_id}".
+	idParam := strings.Trim(elems[len(elems)-1], "{}")
 
 	mux.HandleFunc("POST "+collectionPath, makeCreateHandler(d, r))
 	mux.HandleFunc("GET "+collectionPath, makeListHandler(d, r))
-	mux.HandleFunc("GET "+resourcePath, makeGetHandler(d, r))
-	mux.HandleFunc("PATCH "+resourcePath, makeUpdateHandler(d, r))
-	mux.HandleFunc("DELETE "+resourcePath, makeDeleteHandler(d, r))
+	mux.HandleFunc("GET "+resourcePath, makeGetOrCustomHandler(d, r, customMethods, idParam))
+	mux.HandleFunc("POST "+resourcePath, makePostCustomHandler(r, customMethods, idParam))
+	mux.HandleFunc("PATCH "+resourcePath, makeUpdateHandler(d, r, idParam))
+	mux.HandleFunc("DELETE "+resourcePath, makeDeleteHandler(d, r, idParam))
+}
+
+// makeGetOrCustomHandler returns a handler that serves GET for both regular
+// resources and GET-based custom methods. Go 1.22's {wildcard} matches
+// "id:method" as a single value, so we check for a colon to dispatch.
+func makeGetOrCustomHandler(d *sql.DB, r *api.Resource, customMethods map[string]CustomMethodHandler, idParam string) http.HandlerFunc {
+	getHandler := makeGetHandler(d, r, idParam)
+	return func(w http.ResponseWriter, req *http.Request) {
+		rawID := req.PathValue(idParam)
+		if id, methodName, ok := splitCustomMethod(rawID); ok {
+			cm, exists := customMethods[methodName]
+			if !exists || cm.Method != "GET" {
+				writeError(w, http.StatusNotFound, fmt.Sprintf("custom method %q not found", methodName))
+				return
+			}
+			// Re-set the path value so the handler sees the real ID.
+			req.SetPathValue(idParam, id)
+			cm.Handler(w, req)
+			return
+		}
+		getHandler(w, req)
+	}
+}
+
+// makePostCustomHandler returns a handler for POST-based custom methods.
+// Regular POST to a resource path is not a standard CRUD operation, so any
+// POST to /resource/{id} must be a custom method.
+func makePostCustomHandler(r *api.Resource, customMethods map[string]CustomMethodHandler, idParam string) http.HandlerFunc {
+	return func(w http.ResponseWriter, req *http.Request) {
+		rawID := req.PathValue(idParam)
+		id, methodName, ok := splitCustomMethod(rawID)
+		if !ok {
+			writeError(w, http.StatusMethodNotAllowed, "POST is not allowed on individual resources; use PATCH to update")
+			return
+		}
+		cm, exists := customMethods[methodName]
+		if !exists || cm.Method != "POST" {
+			writeError(w, http.StatusNotFound, fmt.Sprintf("custom method %q not found", methodName))
+			return
+		}
+		req.SetPathValue(idParam, id)
+		cm.Handler(w, req)
+	}
+}
+
+// splitCustomMethod checks if rawID contains a ":" and splits it into
+// (resourceID, methodName, true). Returns ("", "", false) if no colon.
+func splitCustomMethod(rawID string) (string, string, bool) {
+	idx := strings.Index(rawID, ":")
+	if idx < 0 {
+		return "", "", false
+	}
+	return rawID[:idx], rawID[idx+1:], true
 }
 
 func makeCreateHandler(d *sql.DB, r *api.Resource) http.HandlerFunc {
@@ -82,10 +146,10 @@ func makeCreateHandler(d *sql.DB, r *api.Resource) http.HandlerFunc {
 	}
 }
 
-func makeGetHandler(d *sql.DB, r *api.Resource) http.HandlerFunc {
+func makeGetHandler(d *sql.DB, r *api.Resource, idParam string) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
 		parentIDs := extractParentIDs(req, r)
-		id := req.PathValue(r.Singular)
+		id := req.PathValue(idParam)
 		path := buildResourcePath(r, parentIDs, id)
 
 		stored, err := Get(d, r.Plural, path, r.Schema)
@@ -140,10 +204,10 @@ func makeListHandler(d *sql.DB, r *api.Resource) http.HandlerFunc {
 	}
 }
 
-func makeUpdateHandler(d *sql.DB, r *api.Resource) http.HandlerFunc {
+func makeUpdateHandler(d *sql.DB, r *api.Resource, idParam string) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
 		parentIDs := extractParentIDs(req, r)
-		id := req.PathValue(r.Singular)
+		id := req.PathValue(idParam)
 		path := buildResourcePath(r, parentIDs, id)
 
 		existing, err := Get(d, r.Plural, path, r.Schema)
@@ -191,10 +255,10 @@ func makeUpdateHandler(d *sql.DB, r *api.Resource) http.HandlerFunc {
 	}
 }
 
-func makeDeleteHandler(d *sql.DB, r *api.Resource) http.HandlerFunc {
+func makeDeleteHandler(d *sql.DB, r *api.Resource, idParam string) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
 		parentIDs := extractParentIDs(req, r)
-		id := req.PathValue(r.Singular)
+		id := req.PathValue(idParam)
 		path := buildResourcePath(r, parentIDs, id)
 
 		deleted, err := Delete(d, r.Plural, path)
@@ -212,11 +276,11 @@ func makeDeleteHandler(d *sql.DB, r *api.Resource) http.HandlerFunc {
 }
 
 // extractParentIDs pulls parent IDs from the URL path values.
-// PatternElems: ["publishers", "{publisher}", "books", "{book}"]
+// PatternElems: ["publishers", "{publisher_id}", "books", "{book_id}"]
 // Parents are at odd indices before the last two elements.
 func extractParentIDs(req *http.Request, r *api.Resource) map[string]string {
 	parentIDs := make(map[string]string)
-	elems := r.PatternElems
+	elems := r.PatternElems()
 	// Everything before the last 2 elements is parent pairs.
 	for i := 0; i+1 < len(elems)-2; i += 2 {
 		paramName := strings.Trim(elems[i+1], "{}")
@@ -228,7 +292,7 @@ func extractParentIDs(req *http.Request, r *api.Resource) map[string]string {
 // buildResourcePath constructs the AEP path like "publishers/pub1/books/book1".
 func buildResourcePath(r *api.Resource, parentIDs map[string]string, id string) string {
 	var parts []string
-	elems := r.PatternElems
+	elems := r.PatternElems()
 	for i := 0; i < len(elems)-2; i += 2 {
 		collection := elems[i]
 		paramName := strings.Trim(elems[i+1], "{}")
@@ -271,7 +335,6 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 }
 
 func generateID() string {
-	// Simple short ID based on timestamp + random suffix.
 	return fmt.Sprintf("%x", time.Now().UnixNano())
 }
 

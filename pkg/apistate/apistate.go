@@ -15,13 +15,40 @@ import (
 	"github.com/aep-dev/aepbase/pkg/resource"
 )
 
-type State struct {
-	mu        sync.RWMutex
-	API       *api.API
-	mux       *http.ServeMux
-	DB        *sql.DB
-	ServerURL string
+// CustomMethodConfig defines a custom method to register on a resource.
+type CustomMethodConfig struct {
+	// HTTP method: "POST" or "GET".
+	Method string
+	// Request body schema (required for POST methods).
+	RequestSchema *openapi.Schema
+	// Response body schema (required).
+	ResponseSchema *openapi.Schema
+	// Handler is the HTTP handler for the custom method.
+	// The request will have path values extracted for all parent IDs and the resource ID.
+	Handler http.HandlerFunc
 }
+
+// customMethodRegistration stores a registered custom method with its handler.
+type customMethodRegistration struct {
+	resourceSingular string
+	methodName       string
+	config           CustomMethodConfig
+}
+
+type State struct {
+	mu                   sync.RWMutex
+	API                  *api.API
+	mux                  *http.ServeMux
+	DB                   *sql.DB
+	ServerURL            string
+	customMethods        []customMethodRegistration
+	pendingCustomMethods []customMethodRegistration
+}
+
+// metaResourceSingular is the singular name for the built-in meta resource.
+// It is registered in the API for OpenAPI generation but routes are handled
+// separately by the meta package.
+const metaResourceSingular = "resource"
 
 func NewState(d *sql.DB, serverURL string) *State {
 	s := &State{
@@ -33,6 +60,34 @@ func NewState(d *sql.DB, serverURL string) *State {
 			Resources: make(map[string]*api.Resource),
 		},
 	}
+	// Register the meta resource so it appears in the OpenAPI spec.
+	metaResource := &api.Resource{
+		Singular: "resource",
+		Plural:   "resources",
+		Schema: &openapi.Schema{
+			Type: "object",
+			Properties: openapi.Properties{
+				"id":          {Type: "string", ReadOnly: true},
+				"path":        {Type: "string", ReadOnly: true},
+				"singular":    {Type: "string"},
+				"plural":      {Type: "string"},
+				"schema":      {Type: "object"},
+				"parents":     {Type: "array", Items: &openapi.Schema{Type: "string"}},
+				"create_time": {Type: "string", Format: "date-time", ReadOnly: true},
+				"update_time": {Type: "string", Format: "date-time", ReadOnly: true},
+			},
+		},
+		Children: []*api.Resource{},
+		Methods: api.Methods{
+			Get:    &api.GetMethod{},
+			List:   &api.ListMethod{},
+			Create: &api.CreateMethod{SupportsUserSettableCreate: true},
+			Update: &api.UpdateMethod{},
+			Delete: &api.DeleteMethod{},
+		},
+	}
+	metaResource.API = s.API
+	s.API.Resources[metaResourceSingular] = metaResource
 	s.rebuildMux()
 	return s
 }
@@ -51,9 +106,6 @@ func (s *State) AddResource(def meta.ResourceDefinition) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Build pattern elems from parents.
-	patternElems := buildPatternElems(def, s.API.Resources)
-
 	// Build the schema with standard AEP fields added (copy properties to avoid mutating the original).
 	schema := def.Schema
 	schema.Properties = make(openapi.Properties)
@@ -65,33 +117,34 @@ func (s *State) AddResource(def meta.ResourceDefinition) error {
 	schema.Properties["create_time"] = openapi.Schema{Type: "string", Format: "date-time", ReadOnly: true}
 	schema.Properties["update_time"] = openapi.Schema{Type: "string", Format: "date-time", ReadOnly: true}
 
-	// Resolve parent resource pointers.
-	var parents []*api.Resource
+	// Validate parents exist.
 	for _, parentSingular := range def.Parents {
-		p, ok := s.API.Resources[parentSingular]
-		if !ok {
+		if _, ok := s.API.Resources[parentSingular]; !ok {
 			return fmt.Errorf("parent resource %q not found", parentSingular)
 		}
-		parents = append(parents, p)
 	}
 
 	r := &api.Resource{
-		Singular:     def.Singular,
-		Plural:       def.Plural,
-		Parents:      parents,
-		Children:     []*api.Resource{},
-		PatternElems: patternElems,
-		Schema:       &schema,
-		GetMethod:    &api.GetMethod{},
-		ListMethod:   &api.ListMethod{},
-		CreateMethod: &api.CreateMethod{SupportsUserSettableCreate: true},
-		UpdateMethod: &api.UpdateMethod{},
-		DeleteMethod: &api.DeleteMethod{},
+		Singular: def.Singular,
+		Plural:   def.Plural,
+		Parents:  def.Parents,
+		Children: []*api.Resource{},
+		Schema:   &schema,
+		Methods: api.Methods{
+			Get:    &api.GetMethod{},
+			List:   &api.ListMethod{},
+			Create: &api.CreateMethod{SupportsUserSettableCreate: true},
+			Update: &api.UpdateMethod{},
+			Delete: &api.DeleteMethod{},
+		},
 	}
+	r.API = s.API
 
 	// Wire as child of parents.
-	for _, p := range parents {
-		p.Children = append(p.Children, r)
+	for _, parentSingular := range def.Parents {
+		if p, ok := s.API.Resources[parentSingular]; ok {
+			p.Children = append(p.Children, r)
+		}
 	}
 
 	// Create the SQLite table using the user-defined schema (before standard fields were added).
@@ -105,6 +158,20 @@ func (s *State) AddResource(def meta.ResourceDefinition) error {
 	}
 
 	s.API.Resources[def.Singular] = r
+
+	// Apply any custom methods that were registered before this resource existed.
+	var remaining []customMethodRegistration
+	for _, reg := range s.pendingCustomMethods {
+		if reg.resourceSingular == def.Singular {
+			if err := s.addCustomMethodLocked(reg.resourceSingular, reg.methodName, reg.config); err != nil {
+				return fmt.Errorf("applying pending custom method %q: %w", reg.methodName, err)
+			}
+		} else {
+			remaining = append(remaining, reg)
+		}
+	}
+	s.pendingCustomMethods = remaining
+
 	s.rebuildMux()
 	return nil
 }
@@ -128,11 +195,13 @@ func (s *State) RemoveResource(singular string) error {
 	}
 
 	// Remove from parent's children list.
-	for _, p := range r.Parents {
-		for i, c := range p.Children {
-			if c.Singular == singular {
-				p.Children = append(p.Children[:i], p.Children[i+1:]...)
-				break
+	for _, parentSingular := range r.Parents {
+		if p, ok := s.API.Resources[parentSingular]; ok {
+			for i, c := range p.Children {
+				if c.Singular == singular {
+					p.Children = append(p.Children[:i], p.Children[i+1:]...)
+					break
+				}
 			}
 		}
 	}
@@ -218,7 +287,21 @@ func (s *State) rebuildMux() {
 	meta.RegisterRoutes(mux, s)
 	mux.HandleFunc("GET /openapi.json", s.serveOpenAPI)
 	for _, r := range s.API.Resources {
-		resource.RegisterRoutes(mux, s.DB, r)
+		// Skip the meta resource — its routes are registered by meta.RegisterRoutes above.
+		if r.Singular == metaResourceSingular {
+			continue
+		}
+		// Collect custom method handlers for this resource.
+		cmHandlers := make(map[string]resource.CustomMethodHandler)
+		for _, reg := range s.customMethods {
+			if reg.resourceSingular == r.Singular {
+				cmHandlers[reg.methodName] = resource.CustomMethodHandler{
+					Method:  reg.config.Method,
+					Handler: reg.config.Handler,
+				}
+			}
+		}
+		resource.RegisterRoutes(mux, s.DB, r, cmHandlers)
 	}
 	s.mux = mux
 }
@@ -274,17 +357,6 @@ func injectResourceTypes(data []byte, apiName string) ([]byte, error) {
 	return json.MarshalIndent(doc, "", "  ")
 }
 
-func buildPatternElems(def meta.ResourceDefinition, resources map[string]*api.Resource) []string {
-	var elems []string
-	for _, parentSingular := range def.Parents {
-		if parent, ok := resources[parentSingular]; ok {
-			elems = append(elems, parent.PatternElems...)
-		}
-	}
-	elems = append(elems, def.Plural, "{"+def.Singular+"}")
-	return elems
-}
-
 // standardFields are managed by the DB layer as fixed columns.
 var standardFields = map[string]bool{
 	"id": true, "path": true, "create_time": true, "update_time": true,
@@ -314,6 +386,59 @@ func (w *muxWrapper) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	mux := w.state.mux
 	w.state.mu.RUnlock()
 	mux.ServeHTTP(rw, req)
+}
+
+// AddCustomMethod registers a custom method on a resource.
+// The method will be available at /{resource_path}:{methodName}.
+// If the resource does not exist yet, the registration is deferred
+// and will be applied automatically when the resource is added.
+func (s *State) AddCustomMethod(resourceSingular, methodName string, config CustomMethodConfig) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.addCustomMethodLocked(resourceSingular, methodName, config)
+}
+
+func (s *State) addCustomMethodLocked(resourceSingular, methodName string, config CustomMethodConfig) error {
+	if config.Method != "POST" && config.Method != "GET" {
+		return fmt.Errorf("custom method must use POST or GET, got %q", config.Method)
+	}
+	if config.ResponseSchema == nil {
+		return fmt.Errorf("ResponseSchema is required")
+	}
+	if config.Method == "POST" && config.RequestSchema == nil {
+		return fmt.Errorf("RequestSchema is required for POST custom methods")
+	}
+	if config.Handler == nil {
+		return fmt.Errorf("Handler is required")
+	}
+
+	reg := customMethodRegistration{
+		resourceSingular: resourceSingular,
+		methodName:       methodName,
+		config:           config,
+	}
+
+	r, ok := s.API.Resources[resourceSingular]
+	if !ok {
+		// Resource doesn't exist yet — defer until AddResource is called.
+		s.pendingCustomMethods = append(s.pendingCustomMethods, reg)
+		return nil
+	}
+
+	// Add to aep-lib-go's resource for OpenAPI generation.
+	cm := &api.CustomMethod{
+		Name:     methodName,
+		Method:   config.Method,
+		Request:  config.RequestSchema,
+		Response: config.ResponseSchema,
+	}
+	r.CustomMethods = append(r.CustomMethods, cm)
+
+	// Store the registration for route building.
+	s.customMethods = append(s.customMethods, reg)
+
+	s.rebuildMux()
+	return nil
 }
 
 func (s *State) GetDB() *sql.DB {
