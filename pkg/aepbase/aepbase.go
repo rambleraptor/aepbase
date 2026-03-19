@@ -41,6 +41,7 @@ type State struct {
 	mux                  *http.ServeMux
 	DB                   *sql.DB
 	ServerURL            string
+	CORSAllowedOrigins   []string
 	customMethods        []customMethodRegistration
 	pendingCustomMethods []customMethodRegistration
 }
@@ -385,8 +386,35 @@ type muxWrapper struct {
 func (w *muxWrapper) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	w.state.mu.RLock()
 	mux := w.state.mux
+	allowedOrigins := w.state.CORSAllowedOrigins
 	w.state.mu.RUnlock()
+
+	if handleCORS(rw, req, allowedOrigins) {
+		return
+	}
+
 	mux.ServeHTTP(rw, req)
+}
+
+// handleCORS sets CORS headers if the request origin matches an allowed origin.
+// Returns true if the request was a preflight OPTIONS request and has been handled.
+func handleCORS(rw http.ResponseWriter, req *http.Request, allowedOrigins []string) bool {
+	if origin := req.Header.Get("Origin"); origin != "" && len(allowedOrigins) > 0 {
+		for _, allowed := range allowedOrigins {
+			if allowed == "*" || allowed == origin {
+				rw.Header().Set("Access-Control-Allow-Origin", origin)
+				rw.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+				rw.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+				break
+			}
+		}
+	}
+
+	if req.Method == http.MethodOptions {
+		rw.WriteHeader(http.StatusNoContent)
+		return true
+	}
+	return false
 }
 
 // AddCustomMethod registers a custom method on a resource.
