@@ -6,7 +6,7 @@ import (
 	"log"
 	"net/http"
 
-	"github.com/aep-dev/aepbase/pkg/apistate"
+	"github.com/aep-dev/aepbase/pkg/aepbase"
 	"github.com/aep-dev/aepbase/pkg/db"
 	"github.com/aep-dev/aepbase/pkg/meta"
 )
@@ -24,7 +24,7 @@ func main() {
 	}
 	defer d.Close()
 
-	state := apistate.NewState(d, serverURL)
+	state := aepbase.NewState(d, serverURL)
 
 	// Load existing resource definitions from a previous run.
 	defs, err := meta.LoadAll(d)

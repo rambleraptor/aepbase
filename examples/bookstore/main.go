@@ -9,7 +9,7 @@ import (
 	"net/http"
 
 	"github.com/aep-dev/aep-lib-go/pkg/openapi"
-	"github.com/aep-dev/aepbase/pkg/apistate"
+	"github.com/aep-dev/aepbase/pkg/aepbase"
 	"github.com/aep-dev/aepbase/pkg/db"
 	"github.com/aep-dev/aepbase/pkg/meta"
 	"github.com/aep-dev/aepbase/pkg/resource"
@@ -28,7 +28,7 @@ func main() {
 	}
 	defer d.Close()
 
-	state := apistate.NewState(d, serverURL)
+	state := aepbase.NewState(d, serverURL)
 
 	// Restore resources from previous runs.
 	defs, _ := meta.LoadAll(d)
@@ -41,7 +41,7 @@ func main() {
 	// and applied automatically when "book" is created via the meta-API.
 
 	// :publish — sets the book's published field to true.
-	state.AddCustomMethod("book", "publish", apistate.CustomMethodConfig{
+	state.AddCustomMethod("book", "publish", aepbase.CustomMethodConfig{
 		Method: "POST",
 		RequestSchema: &openapi.Schema{
 			Type:       "object",
@@ -58,7 +58,7 @@ func main() {
 	})
 
 	// :purchase — increments the purchase_count field on the book.
-	state.AddCustomMethod("book", "purchase", apistate.CustomMethodConfig{
+	state.AddCustomMethod("book", "purchase", aepbase.CustomMethodConfig{
 		Method: "POST",
 		RequestSchema: &openapi.Schema{
 			Type: "object",

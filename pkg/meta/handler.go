@@ -14,7 +14,7 @@ import (
 )
 
 // StateManager is the interface that the central state must implement.
-// This avoids a circular import between meta and apistate.
+// This avoids a circular import between meta and aepbase.
 type StateManager interface {
 	GetDB() *sql.DB
 	AddResource(def ResourceDefinition) error
