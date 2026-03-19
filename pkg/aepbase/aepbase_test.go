@@ -1,4 +1,4 @@
-package apistate_test
+package aepbase_test
 
 import (
 	"encoding/json"
@@ -10,20 +10,20 @@ import (
 	"testing"
 
 	"github.com/aep-dev/aep-lib-go/pkg/openapi"
-	"github.com/aep-dev/aepbase/pkg/apistate"
+	"github.com/aep-dev/aepbase/pkg/aepbase"
 	"github.com/aep-dev/aepbase/pkg/db"
 	"github.com/aep-dev/aepbase/pkg/meta"
 )
 
 // helper to create a fresh State with an in-memory SQLite DB.
-func newTestState(t *testing.T) *apistate.State {
+func newTestState(t *testing.T) *aepbase.State {
 	t.Helper()
 	d, err := db.Init(":memory:")
 	if err != nil {
 		t.Fatalf("db.Init: %v", err)
 	}
 	t.Cleanup(func() { d.Close() })
-	return apistate.NewState(d, "http://localhost:8080")
+	return aepbase.NewState(d, "http://localhost:8080")
 }
 
 func doRequest(t *testing.T, handler http.Handler, method, path, body string) *http.Response {
@@ -701,7 +701,7 @@ func TestRestartRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("db.Init: %v", err)
 	}
-	state1 := apistate.NewState(d1, "http://localhost:8080")
+	state1 := aepbase.NewState(d1, "http://localhost:8080")
 	h1 := state1.Handler()
 	createResource(t, h1, "publisher", "publisher", "publishers", nil, map[string]any{
 		"name": map[string]any{"type": "string"},
@@ -716,7 +716,7 @@ func TestRestartRecovery(t *testing.T) {
 	}
 	defer d2.Close()
 
-	state2 := apistate.NewState(d2, "http://localhost:8080")
+	state2 := aepbase.NewState(d2, "http://localhost:8080")
 	defs, err := meta.LoadAll(d2)
 	if err != nil {
 		t.Fatalf("meta.LoadAll: %v", err)
@@ -762,7 +762,7 @@ func TestCustomMethodPOST(t *testing.T) {
 	})
 	doRequest(t, h, "POST", "/publishers?id=acme", `{"name":"Acme","archived":false}`)
 
-	err := state.AddCustomMethod("publisher", "archive", apistate.CustomMethodConfig{
+	err := state.AddCustomMethod("publisher", "archive", aepbase.CustomMethodConfig{
 		Method:         "POST",
 		RequestSchema:  &openapi.Schema{Type: "object", Properties: openapi.Properties{}},
 		ResponseSchema: &openapi.Schema{Type: "object", Properties: openapi.Properties{"archived": {Type: "boolean"}}},
@@ -797,7 +797,7 @@ func TestCustomMethodGET(t *testing.T) {
 	})
 	doRequest(t, h, "POST", "/publishers?id=acme", `{"name":"Acme"}`)
 
-	err := state.AddCustomMethod("publisher", "stats", apistate.CustomMethodConfig{
+	err := state.AddCustomMethod("publisher", "stats", aepbase.CustomMethodConfig{
 		Method:         "GET",
 		ResponseSchema: &openapi.Schema{Type: "object", Properties: openapi.Properties{"book_count": {Type: "integer"}}},
 		Handler: func(w http.ResponseWriter, r *http.Request) {
@@ -830,7 +830,7 @@ func TestCustomMethodGETDoesNotBreakRegularGet(t *testing.T) {
 	})
 	doRequest(t, h, "POST", "/publishers?id=acme", `{"name":"Acme"}`)
 
-	err := state.AddCustomMethod("publisher", "stats", apistate.CustomMethodConfig{
+	err := state.AddCustomMethod("publisher", "stats", aepbase.CustomMethodConfig{
 		Method:         "GET",
 		ResponseSchema: &openapi.Schema{Type: "object", Properties: openapi.Properties{"count": {Type: "integer"}}},
 		Handler: func(w http.ResponseWriter, r *http.Request) {
@@ -875,7 +875,7 @@ func TestCustomMethodAppearsInOpenAPI(t *testing.T) {
 		"name": map[string]any{"type": "string"},
 	})
 
-	err := state.AddCustomMethod("publisher", "archive", apistate.CustomMethodConfig{
+	err := state.AddCustomMethod("publisher", "archive", aepbase.CustomMethodConfig{
 		Method:         "POST",
 		RequestSchema:  &openapi.Schema{Type: "object", Properties: openapi.Properties{}},
 		ResponseSchema: &openapi.Schema{Type: "object", Properties: openapi.Properties{"archived": {Type: "boolean"}}},
@@ -908,7 +908,7 @@ func TestCustomMethodOnChildResource(t *testing.T) {
 	setupPublisherAndBook(t, h)
 	doRequest(t, h, "POST", "/publishers/acme/books?id=go-guide", `{"title":"The Go Guide","page_count":350}`)
 
-	err := state.AddCustomMethod("book", "archive", apistate.CustomMethodConfig{
+	err := state.AddCustomMethod("book", "archive", aepbase.CustomMethodConfig{
 		Method:         "POST",
 		RequestSchema:  &openapi.Schema{Type: "object"},
 		ResponseSchema: &openapi.Schema{Type: "object", Properties: openapi.Properties{"status": {Type: "string"}}},
@@ -946,7 +946,7 @@ func TestCustomMethodInvalidConfig(t *testing.T) {
 	})
 
 	// Missing handler.
-	err := state.AddCustomMethod("publisher", "archive", apistate.CustomMethodConfig{
+	err := state.AddCustomMethod("publisher", "archive", aepbase.CustomMethodConfig{
 		Method:         "POST",
 		RequestSchema:  &openapi.Schema{Type: "object"},
 		ResponseSchema: &openapi.Schema{Type: "object"},
@@ -956,7 +956,7 @@ func TestCustomMethodInvalidConfig(t *testing.T) {
 	}
 
 	// Invalid HTTP method.
-	err = state.AddCustomMethod("publisher", "archive", apistate.CustomMethodConfig{
+	err = state.AddCustomMethod("publisher", "archive", aepbase.CustomMethodConfig{
 		Method:         "PUT",
 		RequestSchema:  &openapi.Schema{Type: "object"},
 		ResponseSchema: &openapi.Schema{Type: "object"},
@@ -967,7 +967,7 @@ func TestCustomMethodInvalidConfig(t *testing.T) {
 	}
 
 	// Missing response schema.
-	err = state.AddCustomMethod("publisher", "archive", apistate.CustomMethodConfig{
+	err = state.AddCustomMethod("publisher", "archive", aepbase.CustomMethodConfig{
 		Method:  "POST",
 		Handler: func(w http.ResponseWriter, r *http.Request) {},
 	})
@@ -976,7 +976,7 @@ func TestCustomMethodInvalidConfig(t *testing.T) {
 	}
 
 	// Nonexistent resource — deferred, no error.
-	err = state.AddCustomMethod("nonexistent", "archive", apistate.CustomMethodConfig{
+	err = state.AddCustomMethod("nonexistent", "archive", aepbase.CustomMethodConfig{
 		Method:         "POST",
 		RequestSchema:  &openapi.Schema{Type: "object"},
 		ResponseSchema: &openapi.Schema{Type: "object"},

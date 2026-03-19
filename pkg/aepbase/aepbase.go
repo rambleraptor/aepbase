@@ -1,4 +1,4 @@
-package apistate
+package aepbase
 
 import (
 	"database/sql"

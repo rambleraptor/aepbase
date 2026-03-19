@@ -25,7 +25,7 @@ import (
     "net/http"
 
     "github.com/aep-dev/aep-lib-go/pkg/openapi"
-    "github.com/aep-dev/aepbase/pkg/apistate"
+    "github.com/aep-dev/aepbase/pkg/aepbase"
     "github.com/aep-dev/aepbase/pkg/db"
     "github.com/aep-dev/aepbase/pkg/meta"
 )
@@ -43,7 +43,7 @@ func main() {
     }
     defer d.Close()
 
-    state := apistate.NewState(d, serverURL)
+    state := aepbase.NewState(d, serverURL)
 
     // Restore resources from previous runs.
     defs, _ := meta.LoadAll(d)
@@ -53,7 +53,7 @@ func main() {
 
     // Register a POST custom method on the "publisher" resource.
     // This will be available at POST /publishers/{publisher}:archive
-    state.AddCustomMethod("publisher", "archive", apistate.CustomMethodConfig{
+    state.AddCustomMethod("publisher", "archive", aepbase.CustomMethodConfig{
         Method: "POST",
         RequestSchema: &openapi.Schema{
             Type: "object",
@@ -89,7 +89,7 @@ func main() {
 
     // Register a GET custom method (read-only, no request body).
     // This will be available at GET /publishers/{publisher}:stats
-    state.AddCustomMethod("publisher", "stats", apistate.CustomMethodConfig{
+    state.AddCustomMethod("publisher", "stats", aepbase.CustomMethodConfig{
         Method: "GET",
         ResponseSchema: &openapi.Schema{
             Type: "object",
