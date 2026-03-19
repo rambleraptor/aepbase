@@ -17,3 +17,26 @@ jobs:
       - run: go build ./...
 
       - run: go test ./...
+
+  bookstore-demo:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+
+      - name: Build bookstore server
+        run: go build -o bookstore ./examples/bookstore
+
+      - name: Install aepcli
+        run: go install github.com/aep-dev/aepcli/cmd/aepcli@latest
+
+      - name: Run bookstore demo
+        run: |
+          ./bookstore --db ":memory:" &
+          SERVER_PID=$!
+          sleep 2
+          bash ./examples/bookstore/demo.sh
+          kill $SERVER_PID
