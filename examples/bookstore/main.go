@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 
 	"github.com/aep-dev/aep-lib-go/pkg/openapi"
 	"github.com/aep-dev/aepbase/pkg/aepbase"
@@ -18,6 +19,7 @@ import (
 func main() {
 	port := flag.Int("port", 8080, "port to listen on")
 	dbPath := flag.String("db", "bookstore.db", "path to SQLite database")
+	corsOrigins := flag.String("cors-allowed-origins", "", "comma-separated list of allowed CORS origins")
 	flag.Parse()
 
 	serverURL := fmt.Sprintf("http://localhost:%d", *port)
@@ -29,6 +31,10 @@ func main() {
 	defer d.Close()
 
 	state := aepbase.NewState(d, serverURL)
+
+	if *corsOrigins != "" {
+		state.CORSAllowedOrigins = strings.Split(*corsOrigins, ",")
+	}
 
 	// Restore resources from previous runs.
 	defs, _ := meta.LoadAll(d)
