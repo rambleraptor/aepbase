@@ -28,12 +28,21 @@ func createMetaTables(db *sql.DB) error {
 			id TEXT PRIMARY KEY,
 			singular TEXT NOT NULL UNIQUE,
 			plural TEXT NOT NULL UNIQUE,
+			description TEXT NOT NULL DEFAULT '',
+			examples_json TEXT NOT NULL DEFAULT '{}',
 			schema_json TEXT NOT NULL,
 			parents_json TEXT NOT NULL DEFAULT '[]',
 			create_time TEXT NOT NULL,
 			update_time TEXT NOT NULL
 		)
 	`)
+	if err != nil {
+		return err
+	}
+	// Migrate: add columns if missing (existing databases).
+	// These are no-ops for new databases since the columns are in the CREATE TABLE.
+	db.Exec(`ALTER TABLE _resources ADD COLUMN description TEXT NOT NULL DEFAULT ''`)
+	db.Exec(`ALTER TABLE _resources ADD COLUMN examples_json TEXT NOT NULL DEFAULT '{}'`)
 	return err
 }
 
