@@ -1,0 +1,76 @@
+name: OpenAPI Lint
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  openapi-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Spectral and AEP linter
+        run: |
+          npm install -g @stoplight/spectral-cli
+          npm install @aep_dev/aep-openapi-linter
+
+      - name: Build server
+        run: go build -o aepbase ./
+
+      - name: Start server and create resources
+        run: |
+          ./aepbase -db ":memory:" &
+          SERVER_PID=$!
+
+          # Wait for server to be ready
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8080/openapi.json > /dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+
+          # Create a sample resource so the OpenAPI spec has content
+          curl -sf -X POST 'http://localhost:8080/resources?id=publisher' \
+            -H 'Content-Type: application/json' \
+            -d '{
+              "singular": "publisher",
+              "plural": "publishers",
+              "schema": {
+                "properties": {
+                  "name": {"type": "string"},
+                  "location": {"type": "string"}
+                }
+              }
+            }'
+
+          curl -sf -X POST 'http://localhost:8080/resources?id=book' \
+            -H 'Content-Type: application/json' \
+            -d '{
+              "singular": "book",
+              "plural": "books",
+              "parents": ["publisher"],
+              "schema": {
+                "properties": {
+                  "title": {"type": "string"},
+                  "author": {"type": "string"}
+                }
+              }
+            }'
+
+          # Fetch the OpenAPI spec
+          curl -sf http://localhost:8080/openapi.json -o openapi.json
+
+          kill $SERVER_PID
+
+      - name: Lint OpenAPI spec
+        run: spectral lint openapi.json --ruleset node_modules/@aep_dev/aep-openapi-linter/spectral.yaml
