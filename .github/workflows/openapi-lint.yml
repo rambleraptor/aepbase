@@ -19,7 +19,9 @@ jobs:
           node-version: "20"
 
       - name: Install Spectral and AEP linter
-        run: npm install -g @stoplight/spectral-cli @aep_dev/aep-openapi-linter
+        run: |
+          npm install -g @stoplight/spectral-cli
+          npm install @aep_dev/aep-openapi-linter
 
       - name: Build server
         run: go build -o aepbase ./
