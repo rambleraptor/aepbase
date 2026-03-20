@@ -12,6 +12,38 @@ import (
 	"github.com/aep-dev/aepbase/pkg/meta"
 )
 
+// topoSortDefs orders resource definitions so that parents come before children.
+func topoSortDefs(defs []meta.ResourceDefinition) []meta.ResourceDefinition {
+	byName := make(map[string]meta.ResourceDefinition, len(defs))
+	for _, d := range defs {
+		byName[d.Singular] = d
+	}
+
+	visited := make(map[string]bool, len(defs))
+	var sorted []meta.ResourceDefinition
+
+	var visit func(string)
+	visit = func(name string) {
+		if visited[name] {
+			return
+		}
+		visited[name] = true
+		d, ok := byName[name]
+		if !ok {
+			return
+		}
+		for _, p := range d.Parents {
+			visit(p)
+		}
+		sorted = append(sorted, d)
+	}
+
+	for _, d := range defs {
+		visit(d.Singular)
+	}
+	return sorted
+}
+
 func main() {
 	port := flag.Int("port", 8080, "port to listen on")
 	dbPath := flag.String("db", "aepbase.db", "path to SQLite database file")
@@ -37,6 +69,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to load resource definitions: %v", err)
 	}
+	// Sort so parents are loaded before children.
+	defs = topoSortDefs(defs)
 	for _, def := range defs {
 		if err := state.AddResource(def); err != nil {
 			log.Fatalf("failed to restore resource %q: %v", def.Singular, err)
