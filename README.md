@@ -33,7 +33,7 @@ Server starts at `http://localhost:8080`.
 
 ### Define a resource
 
-aepbase exposes a standard REST API. Define a resource with a single POST:
+`aepbase` exposes a standard REST API. Define a resource with a single POST:
 
 ```bash
 curl -X POST http://localhost:8080/resources \
@@ -51,7 +51,7 @@ curl -X POST http://localhost:8080/resources \
   }'
 ```
 
-That's it — aepbase now serves full CRUD at `/books` and an updated OpenAPI spec at `/openapi.json`.
+`aepbase` now serves full CRUD at `/books` and an updated OpenAPI spec at `/openapi.json`.
 
 ### Using aepcli
 
