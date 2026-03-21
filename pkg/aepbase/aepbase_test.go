@@ -1166,6 +1166,137 @@ func TestApplyRejectsWhenRequiredFieldMissing(t *testing.T) {
 	}
 }
 
+func TestOpenAPIIncludesRequiredFields(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+	schema := map[string]any{
+		"properties": map[string]any{
+			"name":     map[string]any{"type": "string"},
+			"location": map[string]any{"type": "string"},
+		},
+		"required": []any{"name"},
+	}
+	body := map[string]any{
+		"singular": "publisher",
+		"plural":   "publishers",
+		"schema":   schema,
+	}
+	b, _ := json.Marshal(body)
+	resp := doRequest(t, h, "POST", "/resources?id=publisher", string(b))
+	if resp.StatusCode != 200 {
+		t.Fatalf("createResource: status %d", resp.StatusCode)
+	}
+
+	resp = doRequest(t, h, "GET", "/openapi.json", "")
+	m := readJSON(t, resp)
+	components := m["components"].(map[string]any)
+	schemas := components["schemas"].(map[string]any)
+	pub := schemas["publisher"].(map[string]any)
+	req, ok := pub["required"]
+	if !ok {
+		t.Fatal("expected 'required' array in OpenAPI component schema for publisher")
+	}
+	arr := req.([]any)
+	found := false
+	for _, v := range arr {
+		if v == "name" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected 'name' in required array, got %v", arr)
+	}
+
+	// Also verify the required array is returned in the resource definition GET.
+	resp = doRequest(t, h, "GET", "/resources/publisher", "")
+	defn := readJSON(t, resp)
+	defSchema := defn["schema"].(map[string]any)
+	defReq, ok := defSchema["required"]
+	if !ok {
+		t.Fatal("expected 'required' in resource definition schema")
+	}
+	defArr := defReq.([]any)
+	found = false
+	for _, v := range defArr {
+		if v == "name" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected 'name' in resource definition required array, got %v", defArr)
+	}
+}
+
+func TestOpenAPIIncludesRequiredFieldsAfterRestart(t *testing.T) {
+	dbPath := t.TempDir() + "/required.db"
+
+	// Phase 1: Create resource with required field.
+	d1, err := db.Init(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s1 := aepbase.NewState(d1, "http://localhost:8080")
+	h1 := s1.Handler()
+
+	schema := map[string]any{
+		"properties": map[string]any{
+			"name":     map[string]any{"type": "string"},
+			"location": map[string]any{"type": "string"},
+		},
+		"required": []any{"name"},
+	}
+	body := map[string]any{
+		"singular": "publisher",
+		"plural":   "publishers",
+		"schema":   schema,
+	}
+	b, _ := json.Marshal(body)
+	resp := doRequest(t, h1, "POST", "/resources?id=publisher", string(b))
+	if resp.StatusCode != 200 {
+		t.Fatalf("createResource: status %d", resp.StatusCode)
+	}
+	d1.Close()
+
+	// Phase 2: Reopen and recover.
+	d2, err := db.Init(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d2.Close()
+	s2 := aepbase.NewState(d2, "http://localhost:8080")
+	defs, err := meta.LoadAll(d2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, def := range defs {
+		if err := s2.AddResource(def); err != nil {
+			t.Fatalf("AddResource on recovery: %v", err)
+		}
+	}
+	h2 := s2.Handler()
+
+	// Verify required survives restart in OpenAPI.
+	resp = doRequest(t, h2, "GET", "/openapi.json", "")
+	m := readJSON(t, resp)
+	components := m["components"].(map[string]any)
+	schemas := components["schemas"].(map[string]any)
+	pub := schemas["publisher"].(map[string]any)
+	req, ok := pub["required"]
+	if !ok {
+		t.Fatal("expected 'required' in OpenAPI schema after restart")
+	}
+	arr := req.([]any)
+	found := false
+	for _, v := range arr {
+		if v == "name" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected 'name' in required array after restart, got %v", arr)
+	}
+}
+
 // --- Data Type Validation Tests ---
 
 func TestCreateRejectsWrongType(t *testing.T) {
