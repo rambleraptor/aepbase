@@ -52,7 +52,7 @@ type State struct {
 // metaResourceSingular is the singular name for the built-in meta resource.
 // It is registered in the API for OpenAPI generation but routes are handled
 // separately by the meta package.
-const metaResourceSingular = "resource"
+const metaResourceSingular = "definition"
 
 func NewState(d *sql.DB, serverURL string) *State {
 	s := &State{
@@ -68,10 +68,10 @@ func NewState(d *sql.DB, serverURL string) *State {
 			},
 		},
 		resourceDescriptions: map[string]string{
-			"resource": "A resource definition. Create these to dynamically add new API endpoints.",
+			"definition": "A resource definition. Create these to dynamically add new API endpoints.",
 		},
 		resourceExamples: map[string]map[string]any{
-			"resource": {
+			"definition": {
 				"singular": "book",
 				"plural":   "books",
 				"description": "A book published by a publisher.",
@@ -87,13 +87,13 @@ func NewState(d *sql.DB, serverURL string) *State {
 	}
 	// Register the meta resource so it appears in the OpenAPI spec.
 	metaResource := &api.Resource{
-		Singular: "resource",
-		Plural:   "resources",
+		Singular: "definition",
+		Plural:   "definitions",
 		Schema: &openapi.Schema{
 			Type: "object",
 			Properties: openapi.Properties{
 				"id":          {Type: "string", ReadOnly: true, Description: "The unique identifier for this resource definition."},
-				"path":        {Type: "string", ReadOnly: true, Description: "The full resource path (e.g. resources/book)."},
+				"path":        {Type: "string", ReadOnly: true, Description: "The full resource path (e.g. definitions/book)."},
 				"singular":    {Type: "string", Description: "The singular name of the resource (e.g. book)."},
 				"plural":      {Type: "string", Description: "The plural name of the resource, used as the URL collection path (e.g. books)."},
 				"description": {Type: "string", Description: "A human-readable description of the resource."},
@@ -455,8 +455,8 @@ func enrichOpenAPI(data []byte, apiName string, descriptions map[string]string, 
 		description string
 		example     any
 	}{
-		"id":          {"The unique identifier for this resource.", "my-resource"},
-		"path":        {"The full resource path (e.g. publishers/acme/books/1984).", "resources/my-resource"},
+		"id":          {"The unique identifier for this resource.", "my-definition"},
+		"path":        {"The full resource path (e.g. publishers/acme/books/1984).", "definitions/my-definition"},
 		"create_time": {"The time this resource was created.", "2024-01-01T00:00:00Z"},
 		"update_time": {"The time this resource was last updated.", "2024-06-15T12:00:00Z"},
 	}
@@ -553,7 +553,7 @@ func enrichOpenAPI(data []byte, apiName string, descriptions map[string]string, 
 		"page_token":    {"A token from a previous list response to fetch the next page.", "eyJsYXN0X2lkIjoiMTIzIn0="},
 		"skip":          {"The number of results to skip before returning.", 0},
 		"filter":        {"A filter expression to narrow results (e.g. \"author=Orwell\").", "author=Orwell"},
-		"id":            {"The ID to use for the new resource. If omitted, one is generated automatically.", "my-resource"},
+		"id":            {"The ID to use for the new definition. If omitted, one is generated automatically.", "my-definition"},
 		"force":         {"If true, delete even if child resources exist.", false},
 	}
 
@@ -695,7 +695,7 @@ func enrichOpenAPI(data []byte, apiName string, descriptions map[string]string, 
 			badRequest := errResp(400, "The request body is invalid.", "invalid request body")
 			conflict := errResp(409,
 				fmt.Sprintf("A %s with the given ID already exists.", singular),
-				fmt.Sprintf("resource with id %q already exists", "my-resource"),
+				fmt.Sprintf("definition with id %q already exists", "my-definition"),
 			)
 
 			switch action {

@@ -31,7 +31,7 @@ func Init(dbPath string) (*sql.DB, error) {
 
 func createMetaTables(db *sql.DB) error {
 	_, err := db.Exec(`
-		CREATE TABLE IF NOT EXISTS _resources (
+		CREATE TABLE IF NOT EXISTS _definitions (
 			id TEXT PRIMARY KEY,
 			singular TEXT NOT NULL UNIQUE,
 			plural TEXT NOT NULL UNIQUE,
@@ -48,8 +48,8 @@ func createMetaTables(db *sql.DB) error {
 	}
 	// Migrate: add columns if missing (existing databases).
 	// These are no-ops for new databases since the columns are in the CREATE TABLE.
-	db.Exec(`ALTER TABLE _resources ADD COLUMN description TEXT NOT NULL DEFAULT ''`)
-	db.Exec(`ALTER TABLE _resources ADD COLUMN examples_json TEXT NOT NULL DEFAULT '{}'`)
+	db.Exec(`ALTER TABLE _definitions ADD COLUMN description TEXT NOT NULL DEFAULT ''`)
+	db.Exec(`ALTER TABLE _definitions ADD COLUMN examples_json TEXT NOT NULL DEFAULT '{}'`)
 	return err
 }
 

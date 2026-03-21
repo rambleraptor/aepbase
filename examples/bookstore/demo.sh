@@ -21,15 +21,15 @@ echo ""
 # --- Step 1: Create resource definitions ---
 echo "--- Creating resource definitions ---"
 
-echo "Creating publisher resource..."
-aepcli "$API" resource create publisher \
+echo "Creating publisher definition..."
+aepcli "$API" definition create publisher \
   --singular publisher \
   --plural publishers \
   --schema '{"type":"object","properties":{"name":{"type":"string"},"location":{"type":"string"}}}'
 
 echo ""
-echo "Creating book resource (child of publisher)..."
-aepcli "$API" resource create book \
+echo "Creating book definition (child of publisher)..."
+aepcli "$API" definition create book \
   --singular book \
   --plural books \
   --schema '{"type":"object","properties":{"title":{"type":"string"},"author":{"type":"string"},"published":{"type":"boolean"},"purchase_count":{"type":"integer"}}}' \

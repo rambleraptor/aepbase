@@ -36,7 +36,7 @@ Server starts at `http://localhost:8080`.
 `aepbase` exposes a standard REST API. Define a resource with a single POST:
 
 ```bash
-curl -X POST http://localhost:8080/resources \
+curl -X POST http://localhost:8080/definitions \
   -H "Content-Type: application/json" \
   -d '{
     "singular": "book",
@@ -98,7 +98,7 @@ aepcli $API book delete 1984
 
 ```bash
 # Define a child resource
-aepcli $API resource create chapter \
+aepcli $API definition create chapter \
   --singular chapter \
   --plural chapters \
   --parents book \
@@ -177,7 +177,7 @@ main.go              # Standalone server
 pkg/
   aepbase/           # Core orchestration and state management
   db/                # SQLite schema management
-  meta/              # Meta-API handlers (resource definitions CRUD)
+  meta/              # Meta-API handlers (definitions CRUD)
   resource/          # Dynamic resource CRUD handlers and validation
 examples/
   bookstore/         # Example app with custom methods and demo script
