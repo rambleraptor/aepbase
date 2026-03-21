@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"path/filepath"
 	"strings"
 
 	"github.com/aep-dev/aep-lib-go/pkg/openapi"
@@ -18,13 +19,14 @@ import (
 
 func main() {
 	port := flag.Int("port", 8080, "port to listen on")
-	dbPath := flag.String("db", "bookstore.db", "path to SQLite database")
+	dataDir := flag.String("data-dir", "aepbase_data", "directory for database files")
+	dbFile := flag.String("db", "bookstore.db", "database file name")
 	corsOrigins := flag.String("cors-allowed-origins", "", "comma-separated list of allowed CORS origins")
 	flag.Parse()
 
 	serverURL := fmt.Sprintf("http://localhost:%d", *port)
 
-	d, err := db.Init(*dbPath)
+	d, err := db.Init(filepath.Join(*dataDir, *dbFile))
 	if err != nil {
 		log.Fatal(err)
 	}
