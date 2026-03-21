@@ -1,6 +1,6 @@
 # aepbase
 
-A dynamic API backend that follows the [AEP (API Enhancement Proposals)](https://aep.dev) standard. Define resources at runtime via a meta-API and get fully functional CRUD endpoints, a SQLite database, and an OpenAPI 3.0 spec.
+A dynamic API backend that follows the [AEP (API Enhancement Proposals)](https://aep.dev) standard. Define resources at runtime via a meta-API and get fully functional CRUD endpoints, a SQLite database, and an OpenAPI 3.1 spec.
 
 ## Features
 
@@ -8,7 +8,7 @@ A dynamic API backend that follows the [AEP (API Enhancement Proposals)](https:/
 - **Automatic CRUD** — each resource gets Create, Read, Update (PATCH), Apply (PUT), Delete, and List endpoints
 - **Nested resources** — define parent-child relationships (e.g. `/publishers/{id}/books/{id}`)
 - **Custom methods** — add arbitrary POST/GET actions on resources following [AEP-136](https://aep.dev/136) (e.g. `/books/{id}:archive`)
-- **OpenAPI 3.0** — auto-generated spec served at `/openapi.json`
+- **OpenAPI 3.1** — auto-generated spec served at `/openapi.json`, enriched with descriptions, examples, error responses, and tags
 - **SQLite with WAL** — lightweight, zero-config persistence
 - **CORS support** — configurable allowed origins
 
@@ -41,17 +41,22 @@ curl -X POST http://localhost:8080/resources \
   -d '{
     "singular": "book",
     "plural": "books",
+    "description": "A book published by a publisher.",
+    "examples": {
+      "title": "The Great Gatsby",
+      "author": "F. Scott Fitzgerald"
+    },
     "schema": {
       "type": "object",
       "properties": {
-        "title": {"type": "string"},
-        "author": {"type": "string"}
+        "title": {"type": "string", "description": "The title of the book."},
+        "author": {"type": "string", "description": "The author of the book."}
       }
     }
   }'
 ```
 
-`aepbase` now serves full CRUD at `/books` and an updated OpenAPI spec at `/openapi.json`.
+`aepbase` now serves full CRUD at `/books` and an updated OpenAPI spec at `/openapi.json`. The `description`, `examples`, and property-level `description` fields are optional — when provided, they enrich the generated OpenAPI spec with documentation and examples for every operation.
 
 ### Using aepcli
 

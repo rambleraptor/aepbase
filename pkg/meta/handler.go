@@ -210,6 +210,21 @@ func makeUpdateHandler(state StateManager) http.HandlerFunc {
 
 		oldDef := *existing
 
+		// Merge description if provided.
+		if patch.Description != "" {
+			existing.Description = patch.Description
+		}
+
+		// Merge examples if provided.
+		if patch.Examples != nil {
+			if existing.Examples == nil {
+				existing.Examples = make(map[string]any)
+			}
+			for k, v := range patch.Examples {
+				existing.Examples[k] = v
+			}
+		}
+
 		// Merge schema if provided.
 		if patch.Schema.Properties != nil {
 			existing.Schema = patch.Schema
@@ -266,27 +281,28 @@ func makeDeleteHandler(state StateManager) http.HandlerFunc {
 func insertDefinition(db *sql.DB, def *ResourceDefinition) error {
 	schemaJSON, _ := json.Marshal(def.Schema)
 	parentsJSON, _ := json.Marshal(def.Parents)
+	examplesJSON, _ := json.Marshal(def.Examples)
 	_, err := db.Exec(
-		"INSERT INTO _resources (id, singular, plural, schema_json, parents_json, create_time, update_time) VALUES (?, ?, ?, ?, ?, ?, ?)",
-		def.ID, def.Singular, def.Plural, string(schemaJSON), string(parentsJSON), def.CreateTime, def.UpdateTime,
+		"INSERT INTO _resources (id, singular, plural, description, examples_json, schema_json, parents_json, create_time, update_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		def.ID, def.Singular, def.Plural, def.Description, string(examplesJSON), string(schemaJSON), string(parentsJSON), def.CreateTime, def.UpdateTime,
 	)
 	return err
 }
 
 func getDefinitionByID(db *sql.DB, id string) (*ResourceDefinition, error) {
-	row := db.QueryRow("SELECT id, singular, plural, schema_json, parents_json, create_time, update_time FROM _resources WHERE id = ?", id)
+	row := db.QueryRow("SELECT id, singular, plural, description, examples_json, schema_json, parents_json, create_time, update_time FROM _resources WHERE id = ?", id)
 	return scanDefinition(row)
 }
 
 func getDefinition(db *sql.DB, singular string) (*ResourceDefinition, error) {
-	row := db.QueryRow("SELECT id, singular, plural, schema_json, parents_json, create_time, update_time FROM _resources WHERE singular = ?", singular)
+	row := db.QueryRow("SELECT id, singular, plural, description, examples_json, schema_json, parents_json, create_time, update_time FROM _resources WHERE singular = ?", singular)
 	return scanDefinition(row)
 }
 
 func scanDefinition(row *sql.Row) (*ResourceDefinition, error) {
 	var def ResourceDefinition
-	var schemaJSON, parentsJSON string
-	err := row.Scan(&def.ID, &def.Singular, &def.Plural, &schemaJSON, &parentsJSON, &def.CreateTime, &def.UpdateTime)
+	var schemaJSON, parentsJSON, examplesJSON string
+	err := row.Scan(&def.ID, &def.Singular, &def.Plural, &def.Description, &examplesJSON, &schemaJSON, &parentsJSON, &def.CreateTime, &def.UpdateTime)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -295,6 +311,7 @@ func scanDefinition(row *sql.Row) (*ResourceDefinition, error) {
 	}
 	json.Unmarshal([]byte(schemaJSON), &def.Schema)
 	json.Unmarshal([]byte(parentsJSON), &def.Parents)
+	json.Unmarshal([]byte(examplesJSON), &def.Examples)
 	def.Path = "resources/" + def.ID
 	return &def, nil
 }
@@ -304,12 +321,12 @@ func listDefinitions(db *sql.DB, limit int, cursor string) ([]ResourceDefinition
 	var err error
 	if cursor != "" {
 		rows, err = db.Query(
-			"SELECT id, singular, plural, schema_json, parents_json, create_time, update_time FROM _resources WHERE id > ? ORDER BY id LIMIT ?",
+			"SELECT id, singular, plural, description, examples_json, schema_json, parents_json, create_time, update_time FROM _resources WHERE id > ? ORDER BY id LIMIT ?",
 			cursor, limit,
 		)
 	} else {
 		rows, err = db.Query(
-			"SELECT id, singular, plural, schema_json, parents_json, create_time, update_time FROM _resources ORDER BY id LIMIT ?",
+			"SELECT id, singular, plural, description, examples_json, schema_json, parents_json, create_time, update_time FROM _resources ORDER BY id LIMIT ?",
 			limit,
 		)
 	}
@@ -321,12 +338,13 @@ func listDefinitions(db *sql.DB, limit int, cursor string) ([]ResourceDefinition
 	var defs []ResourceDefinition
 	for rows.Next() {
 		var def ResourceDefinition
-		var schemaJSON, parentsJSON string
-		if err := rows.Scan(&def.ID, &def.Singular, &def.Plural, &schemaJSON, &parentsJSON, &def.CreateTime, &def.UpdateTime); err != nil {
+		var schemaJSON, parentsJSON, examplesJSON string
+		if err := rows.Scan(&def.ID, &def.Singular, &def.Plural, &def.Description, &examplesJSON, &schemaJSON, &parentsJSON, &def.CreateTime, &def.UpdateTime); err != nil {
 			return nil, err
 		}
 		json.Unmarshal([]byte(schemaJSON), &def.Schema)
 		json.Unmarshal([]byte(parentsJSON), &def.Parents)
+		json.Unmarshal([]byte(examplesJSON), &def.Examples)
 		def.Path = "resources/" + def.ID
 		defs = append(defs, def)
 	}
@@ -335,9 +353,10 @@ func listDefinitions(db *sql.DB, limit int, cursor string) ([]ResourceDefinition
 
 func updateDefinition(db *sql.DB, def *ResourceDefinition) error {
 	schemaJSON, _ := json.Marshal(def.Schema)
+	examplesJSON, _ := json.Marshal(def.Examples)
 	_, err := db.Exec(
-		"UPDATE _resources SET schema_json = ?, update_time = ? WHERE id = ?",
-		string(schemaJSON), def.UpdateTime, def.ID,
+		"UPDATE _resources SET description = ?, examples_json = ?, schema_json = ?, update_time = ? WHERE id = ?",
+		def.Description, string(examplesJSON), string(schemaJSON), def.UpdateTime, def.ID,
 	)
 	return err
 }
