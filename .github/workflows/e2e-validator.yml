@@ -1,0 +1,80 @@
+name: E2E Validator
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  e2e-validator:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+
+      - name: Build server
+        run: go build -o aepbase ./
+
+      - name: Install aep-e2e-validator
+        run: go install github.com/aep-dev/aep-e2e-validator@latest
+
+      - name: Start server and create resources
+        run: |
+          ./aepbase -db ":memory:" &
+          SERVER_PID=$!
+          echo "SERVER_PID=$SERVER_PID" >> $GITHUB_ENV
+
+          # Wait for server to be ready
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8080/openapi.json > /dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+
+          # Create a top-level resource
+          curl -sf -X POST 'http://localhost:8080/resources?id=publisher' \
+            -H 'Content-Type: application/json' \
+            -d '{
+              "singular": "publisher",
+              "plural": "publishers",
+              "schema": {
+                "properties": {
+                  "name": {"type": "string"},
+                  "location": {"type": "string"}
+                }
+              }
+            }'
+
+          # Create a child resource
+          curl -sf -X POST 'http://localhost:8080/resources?id=book' \
+            -H 'Content-Type: application/json' \
+            -d '{
+              "singular": "book",
+              "plural": "books",
+              "parents": ["publisher"],
+              "schema": {
+                "properties": {
+                  "title": {"type": "string"},
+                  "author": {"type": "string"}
+                }
+              }
+            }'
+
+      - name: Validate top-level resource (publishers)
+        run: aep-e2e-validator validate --config http://localhost:8080/openapi.json --collection publishers
+
+      - name: Create parent for child resource validation
+        run: |
+          curl -sf -X POST 'http://localhost:8080/publishers?id=test-publisher' \
+            -H 'Content-Type: application/json' \
+            -d '{"name": "Test Publisher", "location": "New York"}'
+
+      - name: Validate child resource (books)
+        run: aep-e2e-validator validate --config http://localhost:8080/openapi.json --collection books --parent publishers/test-publisher
+
+      - name: Stop server
+        if: always()
+        run: kill $SERVER_PID || true
