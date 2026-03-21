@@ -20,6 +20,7 @@ type ServerOptions struct {
 	Port               int
 	DataDir            string
 	DBFile             string
+	InMemory           bool
 	CORSAllowedOrigins []string
 	CustomMethods      []CustomMethodOption
 	corsRaw            string
@@ -75,7 +76,13 @@ func Run(opts ServerOptions) error {
 
 	serverURL := fmt.Sprintf("http://localhost:%d", opts.Port)
 
-	d, err := db.Init(filepath.Join(opts.DataDir, opts.DBFile))
+	var dbPath string
+	if opts.InMemory {
+		dbPath = ":memory:"
+	} else {
+		dbPath = filepath.Join(opts.DataDir, opts.DBFile)
+	}
+	d, err := db.Init(dbPath)
 	if err != nil {
 		return fmt.Errorf("failed to initialize database: %v", err)
 	}
