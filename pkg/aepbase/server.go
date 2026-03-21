@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"path/filepath"
 	"strings"
 
 	"github.com/aep-dev/aep-lib-go/pkg/openapi"
@@ -17,7 +18,8 @@ import (
 // Zero-value fields use sensible defaults (port 8080, DB "aepbase.db").
 type ServerOptions struct {
 	Port               int
-	DBPath             string
+	DataDir            string
+	DBFile             string
 	CORSAllowedOrigins []string
 	CustomMethods      []CustomMethodOption
 	corsRaw            string
@@ -42,11 +44,15 @@ func (o *ServerOptions) RegisterFlags() {
 	if o.Port == 0 {
 		o.Port = 8080
 	}
-	if o.DBPath == "" {
-		o.DBPath = "aepbase.db"
+	if o.DataDir == "" {
+		o.DataDir = "aepbase_data"
+	}
+	if o.DBFile == "" {
+		o.DBFile = "aepbase.db"
 	}
 	flag.IntVar(&o.Port, "port", o.Port, "port to listen on")
-	flag.StringVar(&o.DBPath, "db", o.DBPath, "path to SQLite database file")
+	flag.StringVar(&o.DataDir, "data-dir", o.DataDir, "directory for database files")
+	flag.StringVar(&o.DBFile, "db", o.DBFile, "database file name")
 	flag.StringVar(&o.corsRaw, "cors-allowed-origins", "", "comma-separated list of allowed CORS origins (e.g. \"https://ui.aep.dev,http://localhost:3000\")")
 }
 
@@ -56,8 +62,11 @@ func Run(opts ServerOptions) error {
 	if opts.Port == 0 {
 		opts.Port = 8080
 	}
-	if opts.DBPath == "" {
-		opts.DBPath = "aepbase.db"
+	if opts.DataDir == "" {
+		opts.DataDir = "aepbase_data"
+	}
+	if opts.DBFile == "" {
+		opts.DBFile = "aepbase.db"
 	}
 	// If RegisterFlags was used, merge the parsed CORS flag.
 	if opts.corsRaw != "" && len(opts.CORSAllowedOrigins) == 0 {
@@ -66,7 +75,7 @@ func Run(opts ServerOptions) error {
 
 	serverURL := fmt.Sprintf("http://localhost:%d", opts.Port)
 
-	d, err := db.Init(opts.DBPath)
+	d, err := db.Init(filepath.Join(opts.DataDir, opts.DBFile))
 	if err != nil {
 		return fmt.Errorf("failed to initialize database: %v", err)
 	}

@@ -15,7 +15,7 @@ import (
 
 func main() {
 	opts := aepbase.ServerOptions{
-		DBPath: "bookstore.db",
+		DBFile: "bookstore.db",
 		CustomMethods: []aepbase.CustomMethodOption{
 			{
 				ResourceSingular: "book",
