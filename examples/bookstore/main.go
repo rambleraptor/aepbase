@@ -7,86 +7,61 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"path/filepath"
-	"strings"
 
 	"github.com/aep-dev/aep-lib-go/pkg/openapi"
 	"github.com/aep-dev/aepbase/pkg/aepbase"
-	"github.com/aep-dev/aepbase/pkg/db"
-	"github.com/aep-dev/aepbase/pkg/meta"
 	"github.com/aep-dev/aepbase/pkg/resource"
 )
 
 func main() {
-	port := flag.Int("port", 8080, "port to listen on")
-	dataDir := flag.String("data-dir", "aepbase_data", "directory for database files")
-	dbFile := flag.String("db", "bookstore.db", "database file name")
-	corsOrigins := flag.String("cors-allowed-origins", "", "comma-separated list of allowed CORS origins")
+	opts := aepbase.ServerOptions{
+		DBFile: "bookstore.db",
+		CustomMethods: []aepbase.CustomMethodOption{
+			{
+				ResourceSingular: "book",
+				MethodName:       "publish",
+				Method:           "POST",
+				RequestSchema: &openapi.Schema{
+					Type:       "object",
+					Properties: openapi.Properties{},
+				},
+				ResponseSchema: &openapi.Schema{
+					Type: "object",
+					Properties: openapi.Properties{
+						"id":        {Type: "string"},
+						"published": {Type: "boolean"},
+					},
+				},
+				Handler: makePublishHandler,
+			},
+			{
+				ResourceSingular: "book",
+				MethodName:       "purchase",
+				Method:           "POST",
+				RequestSchema: &openapi.Schema{
+					Type: "object",
+					Properties: openapi.Properties{
+						"quantity": {Type: "integer"},
+					},
+				},
+				ResponseSchema: &openapi.Schema{
+					Type: "object",
+					Properties: openapi.Properties{
+						"id":             {Type: "string"},
+						"purchase_count": {Type: "integer"},
+						"quantity":       {Type: "integer"},
+					},
+				},
+				Handler: makePurchaseHandler,
+			},
+		},
+	}
+	opts.RegisterFlags()
 	flag.Parse()
 
-	serverURL := fmt.Sprintf("http://localhost:%d", *port)
-
-	d, err := db.Init(filepath.Join(*dataDir, *dbFile))
-	if err != nil {
+	if err := aepbase.Run(opts); err != nil {
 		log.Fatal(err)
 	}
-	defer d.Close()
-
-	state := aepbase.NewState(d, serverURL)
-
-	if *corsOrigins != "" {
-		state.CORSAllowedOrigins = strings.Split(*corsOrigins, ",")
-	}
-
-	// Restore resources from previous runs.
-	defs, _ := meta.LoadAll(d)
-	for _, def := range defs {
-		state.AddResource(def)
-	}
-
-	// Register custom methods on the "book" resource.
-	// If the resource doesn't exist yet (first run), these are deferred
-	// and applied automatically when "book" is created via the meta-API.
-
-	// :publish — sets the book's published field to true.
-	state.AddCustomMethod("book", "publish", aepbase.CustomMethodConfig{
-		Method: "POST",
-		RequestSchema: &openapi.Schema{
-			Type:       "object",
-			Properties: openapi.Properties{},
-		},
-		ResponseSchema: &openapi.Schema{
-			Type: "object",
-			Properties: openapi.Properties{
-				"id":        {Type: "string"},
-				"published": {Type: "boolean"},
-			},
-		},
-		Handler: makePublishHandler(d),
-	})
-
-	// :purchase — increments the purchase_count field on the book.
-	state.AddCustomMethod("book", "purchase", aepbase.CustomMethodConfig{
-		Method: "POST",
-		RequestSchema: &openapi.Schema{
-			Type: "object",
-			Properties: openapi.Properties{
-				"quantity": {Type: "integer"},
-			},
-		},
-		ResponseSchema: &openapi.Schema{
-			Type: "object",
-			Properties: openapi.Properties{
-				"id":             {Type: "string"},
-				"purchase_count": {Type: "integer"},
-				"quantity":       {Type: "integer"},
-			},
-		},
-		Handler: makePurchaseHandler(d),
-	})
-
-	log.Printf("Bookstore server listening on %s", serverURL)
-	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", *port), state.Handler()))
 }
 
 func makePublishHandler(d *sql.DB) http.HandlerFunc {
