@@ -209,7 +209,7 @@ func makeListHandler(d *sql.DB, r *api.Resource) http.HandlerFunc {
 			}
 		}
 
-		// Filter support: simple field=value filtering.
+		// CEL filter support.
 		filter := ""
 		if r.Methods.List != nil && r.Methods.List.SupportsFilter {
 			filter = req.URL.Query().Get("filter")
@@ -217,6 +217,10 @@ func makeListHandler(d *sql.DB, r *api.Resource) http.HandlerFunc {
 
 		results, nextPageToken, err := List(d, r.Plural, parentIDs, r.Schema, pageSize, pageToken, skip, filter)
 		if err != nil {
+			if strings.Contains(err.Error(), "invalid filter") {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
 			writeError(w, http.StatusInternalServerError, fmt.Sprintf("database error: %v", err))
 			return
 		}
