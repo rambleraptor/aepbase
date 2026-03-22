@@ -8,6 +8,9 @@ import (
 
 	"github.com/aep-dev/aep-lib-go/pkg/openapi"
 	"github.com/aep-dev/aepbase/pkg/db"
+	"github.com/google/cel-go/cel"
+	cel2sql "github.com/spandigital/cel2sql/v3"
+	sqliteDialect "github.com/spandigital/cel2sql/v3/dialect/sqlite"
 )
 
 type StoredResource struct {
@@ -95,12 +98,12 @@ func List(d *sql.DB, plural string, parentIDs map[string]string, schema *openapi
 		}
 	}
 
-	// Simple filter support: "field=value" expressions joined by " AND ".
+	// CEL filter support via cel2sql.
 	if filter != "" {
-		filterClauses := parseFilter(filter, schema)
-		for _, fc := range filterClauses {
-			whereClauses = append(whereClauses, fmt.Sprintf("%s = ?", fc.column))
-			args = append(args, fc.value)
+		sql, params, err := filterToSQL(filter, schema)
+		if err == nil && sql != "" {
+			whereClauses = append(whereClauses, sql)
+			args = append(args, params...)
 		}
 	}
 
@@ -160,37 +163,52 @@ func List(d *sql.DB, plural string, parentIDs map[string]string, schema *openapi
 	return results, nextPageToken, nil
 }
 
-// filterClause represents a single parsed filter condition.
-type filterClause struct {
-	column string
-	value  string
+// filterToSQL converts a CEL filter expression to a parameterized SQL WHERE clause
+// using the resource schema for type information. Returns the SQL fragment, bound
+// parameter values, and any error. Invalid or unrecognised filters are silently
+// ignored by the caller so that unfiltered results are returned instead.
+func filterToSQL(filter string, schema *openapi.Schema) (string, []any, error) {
+	env, err := buildCELEnv(schema)
+	if err != nil {
+		return "", nil, fmt.Errorf("building CEL env: %w", err)
+	}
+	ast, iss := env.Compile(filter)
+	if iss != nil && iss.Err() != nil {
+		return "", nil, fmt.Errorf("compiling filter: %w", iss.Err())
+	}
+	result, err := cel2sql.ConvertParameterized(ast, cel2sql.WithDialect(sqliteDialect.New()))
+	if err != nil {
+		return "", nil, fmt.Errorf("converting filter to SQL: %w", err)
+	}
+	return result.SQL, result.Parameters, nil
 }
 
-// parseFilter parses a simple filter string of "field=value" expressions joined by " AND ".
-// Only fields that exist in the schema (and are not standard fields) are accepted.
-func parseFilter(filter string, schema *openapi.Schema) []filterClause {
-	var clauses []filterClause
-	parts := strings.Split(filter, " AND ")
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		eqIdx := strings.Index(part, "=")
-		if eqIdx < 0 {
+// buildCELEnv creates a CEL environment from the resource schema. Each schema
+// property (excluding standard AEP fields) is declared as a nullable CEL variable
+// so that null comparisons are supported alongside typed operations.
+func buildCELEnv(schema *openapi.Schema) (*cel.Env, error) {
+	var opts []cel.EnvOption
+	for field, prop := range schema.Properties {
+		if standardFields[field] {
 			continue
 		}
-		field := strings.TrimSpace(part[:eqIdx])
-		value := strings.TrimSpace(part[eqIdx+1:])
-		// Strip surrounding quotes if present.
-		if len(value) >= 2 && value[0] == '\'' && value[len(value)-1] == '\'' {
-			value = value[1 : len(value)-1]
-		} else if len(value) >= 2 && value[0] == '"' && value[len(value)-1] == '"' {
-			value = value[1 : len(value)-1]
-		}
-		// Only allow filtering on known schema properties.
-		if _, ok := schema.Properties[field]; ok && !standardFields[field] {
-			clauses = append(clauses, filterClause{column: field, value: value})
-		}
+		opts = append(opts, cel.Variable(field, cel.NullableType(openAPITypeToCEL(prop))))
 	}
-	return clauses
+	return cel.NewEnv(opts...)
+}
+
+// openAPITypeToCEL maps an OpenAPI schema property type to the corresponding CEL type.
+func openAPITypeToCEL(prop openapi.Schema) *cel.Type {
+	switch prop.Type {
+	case "integer":
+		return cel.IntType
+	case "number":
+		return cel.DoubleType
+	case "boolean":
+		return cel.BoolType
+	default:
+		return cel.StringType
+	}
 }
 
 func Update(d *sql.DB, plural string, path string, fields map[string]any, updateTime string, schema *openapi.Schema) error {
