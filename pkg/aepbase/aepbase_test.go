@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -1384,6 +1385,89 @@ func TestListFilterAppearsInOpenAPI(t *testing.T) {
 	}
 	if !foundSkip {
 		t.Error("expected 'skip' parameter in OpenAPI list operation")
+	}
+}
+
+// --- CEL Filter Expression Tests ---
+// These tests define the expected behavior for CEL-based list filtering via cel2sql.
+// Supported CEL features for AEP resource filtering:
+//   - Equality (==) and inequality (!=)
+//   - Numeric comparisons (>, >=, <, <=)
+//   - Logical AND (&&) and OR (||)
+//   - String functions: contains(), startsWith(), endsWith()
+//   - Boolean field filtering
+//   - Null field checks
+
+func TestCELFilterExpressions(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+	createResource(t, h, "publisher", "publisher", "publishers", nil, map[string]any{
+		"name":        map[string]any{"type": "string"},
+		"location":    map[string]any{"type": "string"},
+		"age":         map[string]any{"type": "integer"},
+		"active":      map[string]any{"type": "boolean"},
+		"description": map[string]any{"type": "string"},
+	})
+	doRequest(t, h, "POST", "/publishers?id=acme", `{"name":"Acme Corp","location":"NYC","age":25,"active":true,"description":"A leading publisher"}`)
+	doRequest(t, h, "POST", "/publishers?id=beta", `{"name":"Beta Inc","location":"LA","age":40,"active":false,"description":"A rising star"}`)
+	doRequest(t, h, "POST", "/publishers?id=gamma", `{"name":"Gamma Ltd","location":"NYC","age":35,"active":true}`)
+
+	tests := []struct {
+		name    string
+		filter  string
+		wantLen int
+	}{
+		// Equality and inequality
+		{"equality match", `name == "Acme Corp"`, 1},
+		{"equality no match", `name == "Nonexistent"`, 0},
+		{"inequality", `name != "Acme Corp"`, 2},
+
+		// Numeric comparisons
+		{"greater than", `age > 30`, 2},
+		{"greater than or equal", `age >= 35`, 2},
+		{"less than", `age < 35`, 1},
+		{"less than or equal", `age <= 35`, 2},
+
+		// Logical AND
+		{"AND both match", `location == "NYC" && active == true`, 2},
+		{"AND no match", `location == "LA" && active == true`, 0},
+
+		// Logical OR
+		{"OR all match", `location == "NYC" || location == "LA"`, 3},
+		{"OR one match", `location == "London" || location == "LA"`, 1},
+
+		// String functions
+		{"contains match", `name.contains("Corp")`, 1},
+		{"contains no match", `name.contains("xyz")`, 0},
+		{"startsWith match", `name.startsWith("Acme")`, 1},
+		{"startsWith no match", `name.startsWith("Zzz")`, 0},
+		{"endsWith match", `name.endsWith("Inc")`, 1},
+		{"endsWith no match", `name.endsWith("zzz")`, 0},
+
+		// Boolean fields
+		{"boolean true", `active == true`, 2},
+		{"boolean false", `active == false`, 1},
+
+		// Null checks (gamma has no description)
+		{"null field", `description == null`, 1},
+		{"not null field", `description != null`, 2},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := doRequest(t, h, "GET", "/publishers?filter="+url.QueryEscape(tc.filter), "")
+			if resp.StatusCode != 200 {
+				t.Fatalf("filter %q: expected 200, got %d", tc.filter, resp.StatusCode)
+			}
+			m := readJSON(t, resp)
+			var results []any
+			if m["results"] != nil {
+				results = m["results"].([]any)
+			}
+			if len(results) != tc.wantLen {
+				t.Errorf("filter %q: expected %d results, got %d", tc.filter, tc.wantLen, len(results))
+			}
+		})
 	}
 }
 
