@@ -36,7 +36,7 @@ Server starts at `http://localhost:8080`.
 `aepbase` exposes a standard REST API. Define a resource with a single POST:
 
 ```bash
-curl -X POST http://localhost:8080/definitions \
+curl -X POST http://localhost:8080/aep-resource-definitions \
   -H "Content-Type: application/json" \
   -d '{
     "singular": "book",
@@ -98,7 +98,7 @@ aepcli $API book delete 1984
 
 ```bash
 # Define a child resource
-aepcli $API definition create chapter \
+aepcli $API aep-resource-definition create chapter \
   --singular chapter \
   --plural chapters \
   --parents book \
