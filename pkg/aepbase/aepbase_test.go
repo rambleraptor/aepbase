@@ -67,7 +67,7 @@ func createResource(t *testing.T, h http.Handler, id, singular, plural string, p
 		body["parents"] = parents
 	}
 	b, _ := json.Marshal(body)
-	path := "/resources"
+	path := "/aep-resource-definitions"
 	if id != "" {
 		path += "?id=" + id
 	}
@@ -90,8 +90,8 @@ func TestCreateResource(t *testing.T) {
 	if m["id"] != "publisher" {
 		t.Errorf("expected id=publisher, got %v", m["id"])
 	}
-	if m["path"] != "resources/publisher" {
-		t.Errorf("expected path=resources/publisher, got %v", m["path"])
+	if m["path"] != "aep-resource-definitions/publisher" {
+		t.Errorf("expected path=aep-resource-definitions/publisher, got %v", m["path"])
 	}
 	if m["create_time"] == nil || m["update_time"] == nil {
 		t.Error("expected timestamps")
@@ -128,7 +128,7 @@ func TestCreateResourceDuplicate(t *testing.T) {
 		"name": map[string]any{"type": "string"},
 	})
 	body := `{"singular":"publisher","plural":"publishers2","schema":{"properties":{"name":{"type":"string"}}}}`
-	resp := doRequest(t, h, "POST", "/resources?id=publisher", body)
+	resp := doRequest(t, h, "POST", "/aep-resource-definitions?id=publisher", body)
 	if resp.StatusCode != 409 {
 		t.Errorf("expected 409, got %d", resp.StatusCode)
 	}
@@ -137,7 +137,7 @@ func TestCreateResourceDuplicate(t *testing.T) {
 func TestCreateResourceMissingFields(t *testing.T) {
 	state := newTestState(t)
 	h := state.Handler()
-	resp := doRequest(t, h, "POST", "/resources", `{"singular":"","plural":""}`)
+	resp := doRequest(t, h, "POST", "/aep-resource-definitions", `{"singular":"","plural":""}`)
 	if resp.StatusCode != 400 {
 		t.Errorf("expected 400, got %d", resp.StatusCode)
 	}
@@ -147,7 +147,7 @@ func TestCreateResourceInvalidParent(t *testing.T) {
 	state := newTestState(t)
 	h := state.Handler()
 	body := `{"singular":"book","plural":"books","parents":["nonexistent"],"schema":{"properties":{"title":{"type":"string"}}}}`
-	resp := doRequest(t, h, "POST", "/resources?id=book", body)
+	resp := doRequest(t, h, "POST", "/aep-resource-definitions?id=book", body)
 	if resp.StatusCode != 400 {
 		t.Errorf("expected 400, got %d", resp.StatusCode)
 	}
@@ -159,7 +159,7 @@ func TestGetResource(t *testing.T) {
 	createResource(t, h, "publisher", "publisher", "publishers", nil, map[string]any{
 		"name": map[string]any{"type": "string"},
 	})
-	resp := doRequest(t, h, "GET", "/resources/publisher", "")
+	resp := doRequest(t, h, "GET", "/aep-resource-definitions/publisher", "")
 	if resp.StatusCode != 200 {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
@@ -172,7 +172,7 @@ func TestGetResource(t *testing.T) {
 func TestGetResourceNotFound(t *testing.T) {
 	state := newTestState(t)
 	h := state.Handler()
-	resp := doRequest(t, h, "GET", "/resources/nonexistent", "")
+	resp := doRequest(t, h, "GET", "/aep-resource-definitions/nonexistent", "")
 	if resp.StatusCode != 404 {
 		t.Errorf("expected 404, got %d", resp.StatusCode)
 	}
@@ -187,7 +187,7 @@ func TestListResources(t *testing.T) {
 	createResource(t, h, "author", "author", "authors", nil, map[string]any{
 		"name": map[string]any{"type": "string"},
 	})
-	resp := doRequest(t, h, "GET", "/resources", "")
+	resp := doRequest(t, h, "GET", "/aep-resource-definitions", "")
 	if resp.StatusCode != 200 {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
@@ -204,11 +204,11 @@ func TestDeleteResource(t *testing.T) {
 	createResource(t, h, "publisher", "publisher", "publishers", nil, map[string]any{
 		"name": map[string]any{"type": "string"},
 	})
-	resp := doRequest(t, h, "DELETE", "/resources/publisher", "")
+	resp := doRequest(t, h, "DELETE", "/aep-resource-definitions/publisher", "")
 	if resp.StatusCode != 204 {
 		t.Errorf("expected 204, got %d", resp.StatusCode)
 	}
-	resp = doRequest(t, h, "GET", "/resources/publisher", "")
+	resp = doRequest(t, h, "GET", "/aep-resource-definitions/publisher", "")
 	if resp.StatusCode != 404 {
 		t.Errorf("expected 404 after delete, got %d", resp.StatusCode)
 	}
@@ -223,7 +223,7 @@ func TestDeleteResourceWithChildren(t *testing.T) {
 	createResource(t, h, "book", "book", "books", []string{"publisher"}, map[string]any{
 		"title": map[string]any{"type": "string"},
 	})
-	resp := doRequest(t, h, "DELETE", "/resources/publisher", "")
+	resp := doRequest(t, h, "DELETE", "/aep-resource-definitions/publisher", "")
 	if resp.StatusCode != 400 {
 		t.Errorf("expected 400 (has children), got %d", resp.StatusCode)
 	}
@@ -240,7 +240,7 @@ func TestUpdateResourceAddColumn(t *testing.T) {
 
 	// Add a column.
 	patch := `{"schema":{"properties":{"name":{"type":"string"},"location":{"type":"string"}}}}`
-	resp := doRequest(t, h, "PATCH", "/resources/publisher", patch)
+	resp := doRequest(t, h, "PATCH", "/aep-resource-definitions/publisher", patch)
 	if resp.StatusCode != 200 {
 		m := readJSON(t, resp)
 		t.Fatalf("expected 200, got %d: %v", resp.StatusCode, m)
@@ -271,7 +271,7 @@ func TestUpdateResourceRemoveColumn(t *testing.T) {
 
 	// Remove location column.
 	patch := `{"schema":{"properties":{"name":{"type":"string"}}}}`
-	resp := doRequest(t, h, "PATCH", "/resources/publisher", patch)
+	resp := doRequest(t, h, "PATCH", "/aep-resource-definitions/publisher", patch)
 	if resp.StatusCode != 200 {
 		m := readJSON(t, resp)
 		t.Fatalf("expected 200, got %d: %v", resp.StatusCode, m)
@@ -296,7 +296,7 @@ func TestUpdateResourceChangeType(t *testing.T) {
 		"name": map[string]any{"type": "string"},
 	})
 	patch := `{"schema":{"properties":{"name":{"type":"integer"}}}}`
-	resp := doRequest(t, h, "PATCH", "/resources/publisher", patch)
+	resp := doRequest(t, h, "PATCH", "/aep-resource-definitions/publisher", patch)
 	if resp.StatusCode != 400 {
 		t.Errorf("expected 400 on type change, got %d", resp.StatusCode)
 	}
@@ -315,7 +315,7 @@ func TestUpdateResourceChangeParents(t *testing.T) {
 		"title": map[string]any{"type": "string"},
 	})
 	patch := `{"parents":["author"]}`
-	resp := doRequest(t, h, "PATCH", "/resources/book", patch)
+	resp := doRequest(t, h, "PATCH", "/aep-resource-definitions/book", patch)
 	if resp.StatusCode != 400 {
 		t.Errorf("expected 400 on parent change, got %d", resp.StatusCode)
 	}
@@ -650,7 +650,7 @@ func TestOpenAPIAfterDelete(t *testing.T) {
 	createResource(t, h, "publisher", "publisher", "publishers", nil, map[string]any{
 		"name": map[string]any{"type": "string"},
 	})
-	doRequest(t, h, "DELETE", "/resources/publisher", "")
+	doRequest(t, h, "DELETE", "/aep-resource-definitions/publisher", "")
 
 	resp := doRequest(t, h, "GET", "/openapi.json", "")
 	m := readJSON(t, resp)
@@ -660,7 +660,7 @@ func TestOpenAPIAfterDelete(t *testing.T) {
 	}
 	// After deleting the user resource, only the built-in meta resource paths should remain.
 	for p := range paths {
-		if p != "/resources" && p != "/resources/{resource_id}" {
+		if p != "/aep-resource-definitions" && p != "/aep-resource-definitions/{aep_resource_definition_id}" {
 			t.Errorf("unexpected path %q after deleting resource", p)
 		}
 	}
@@ -1101,7 +1101,7 @@ func TestCreateRejectsWhenRequiredFieldMissing(t *testing.T) {
 		"schema":   schema,
 	}
 	b, _ := json.Marshal(body)
-	resp := doRequest(t, h, "POST", "/resources?id=publisher", string(b))
+	resp := doRequest(t, h, "POST", "/aep-resource-definitions?id=publisher", string(b))
 	if resp.StatusCode != 200 {
 		m := readJSON(t, resp)
 		t.Fatalf("createResource: status %d: %v", resp.StatusCode, m)
@@ -1134,7 +1134,7 @@ func TestCreateSucceedsWhenRequiredFieldPresent(t *testing.T) {
 		"schema":   schema,
 	}
 	b, _ := json.Marshal(body)
-	doRequest(t, h, "POST", "/resources?id=publisher", string(b))
+	doRequest(t, h, "POST", "/aep-resource-definitions?id=publisher", string(b))
 
 	resp := doRequest(t, h, "POST", "/publishers?id=acme", `{"name":"Acme"}`)
 	if resp.StatusCode != 200 {
@@ -1158,7 +1158,7 @@ func TestApplyRejectsWhenRequiredFieldMissing(t *testing.T) {
 		"schema":   schema,
 	}
 	b, _ := json.Marshal(body)
-	doRequest(t, h, "POST", "/resources?id=publisher", string(b))
+	doRequest(t, h, "POST", "/aep-resource-definitions?id=publisher", string(b))
 
 	resp := doRequest(t, h, "PUT", "/publishers/acme", `{}`)
 	if resp.StatusCode != 400 {
@@ -1182,7 +1182,7 @@ func TestOpenAPIIncludesRequiredFields(t *testing.T) {
 		"schema":   schema,
 	}
 	b, _ := json.Marshal(body)
-	resp := doRequest(t, h, "POST", "/resources?id=publisher", string(b))
+	resp := doRequest(t, h, "POST", "/aep-resource-definitions?id=publisher", string(b))
 	if resp.StatusCode != 200 {
 		t.Fatalf("createResource: status %d", resp.StatusCode)
 	}
@@ -1208,7 +1208,7 @@ func TestOpenAPIIncludesRequiredFields(t *testing.T) {
 	}
 
 	// Also verify the required array is returned in the resource definition GET.
-	resp = doRequest(t, h, "GET", "/resources/publisher", "")
+	resp = doRequest(t, h, "GET", "/aep-resource-definitions/publisher", "")
 	defn := readJSON(t, resp)
 	defSchema := defn["schema"].(map[string]any)
 	defReq, ok := defSchema["required"]
@@ -1251,7 +1251,7 @@ func TestOpenAPIIncludesRequiredFieldsAfterRestart(t *testing.T) {
 		"schema":   schema,
 	}
 	b, _ := json.Marshal(body)
-	resp := doRequest(t, h1, "POST", "/resources?id=publisher", string(b))
+	resp := doRequest(t, h1, "POST", "/aep-resource-definitions?id=publisher", string(b))
 	if resp.StatusCode != 200 {
 		t.Fatalf("createResource: status %d", resp.StatusCode)
 	}
@@ -1389,7 +1389,7 @@ func TestCreateStripsReadOnlyFields(t *testing.T) {
 		"schema":   schema,
 	}
 	b, _ := json.Marshal(body)
-	doRequest(t, h, "POST", "/resources?id=publisher", string(b))
+	doRequest(t, h, "POST", "/aep-resource-definitions?id=publisher", string(b))
 
 	// Try creating with the read-only field — should be silently stripped.
 	resp := doRequest(t, h, "POST", "/publishers?id=acme", `{"name":"Acme","status":"active"}`)
@@ -1419,7 +1419,7 @@ func TestUpdateStripsReadOnlyFields(t *testing.T) {
 		"schema":   schema,
 	}
 	b, _ := json.Marshal(body)
-	doRequest(t, h, "POST", "/resources?id=publisher", string(b))
+	doRequest(t, h, "POST", "/aep-resource-definitions?id=publisher", string(b))
 
 	doRequest(t, h, "POST", "/publishers?id=acme", `{"name":"Acme"}`)
 
@@ -1599,21 +1599,21 @@ func TestDeleteResourceWithGrandchildren(t *testing.T) {
 	})
 
 	// Cannot delete book because chapter depends on it.
-	resp := doRequest(t, h, "DELETE", "/resources/book", "")
+	resp := doRequest(t, h, "DELETE", "/aep-resource-definitions/book", "")
 	if resp.StatusCode != 400 {
 		t.Errorf("expected 400 (has children), got %d", resp.StatusCode)
 	}
 
 	// Delete chapter first, then book, then publisher.
-	resp = doRequest(t, h, "DELETE", "/resources/chapter", "")
+	resp = doRequest(t, h, "DELETE", "/aep-resource-definitions/chapter", "")
 	if resp.StatusCode != 204 {
 		t.Errorf("expected 204 deleting chapter, got %d", resp.StatusCode)
 	}
-	resp = doRequest(t, h, "DELETE", "/resources/book", "")
+	resp = doRequest(t, h, "DELETE", "/aep-resource-definitions/book", "")
 	if resp.StatusCode != 204 {
 		t.Errorf("expected 204 deleting book, got %d", resp.StatusCode)
 	}
-	resp = doRequest(t, h, "DELETE", "/resources/publisher", "")
+	resp = doRequest(t, h, "DELETE", "/aep-resource-definitions/publisher", "")
 	if resp.StatusCode != 204 {
 		t.Errorf("expected 204 deleting publisher, got %d", resp.StatusCode)
 	}

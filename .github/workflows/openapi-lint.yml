@@ -40,7 +40,7 @@ jobs:
           done
 
           # Create a sample resource so the OpenAPI spec has content
-          curl -sf -X POST 'http://localhost:8080/resources?id=publisher' \
+          curl -sf -X POST 'http://localhost:8080/aep-resource-definitions?id=publisher' \
             -H 'Content-Type: application/json' \
             -d '{
               "singular": "publisher",
@@ -53,7 +53,7 @@ jobs:
               }
             }'
 
-          curl -sf -X POST 'http://localhost:8080/resources?id=book' \
+          curl -sf -X POST 'http://localhost:8080/aep-resource-definitions?id=book' \
             -H 'Content-Type: application/json' \
             -d '{
               "singular": "book",

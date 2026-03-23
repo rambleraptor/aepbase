@@ -23,11 +23,11 @@ type StateManager interface {
 }
 
 func RegisterRoutes(mux *http.ServeMux, state StateManager) {
-	mux.HandleFunc("POST /resources", makeCreateHandler(state))
-	mux.HandleFunc("GET /resources", makeListHandler(state))
-	mux.HandleFunc("GET /resources/{resource}", makeGetHandler(state))
-	mux.HandleFunc("PATCH /resources/{resource}", makeUpdateHandler(state))
-	mux.HandleFunc("DELETE /resources/{resource}", makeDeleteHandler(state))
+	mux.HandleFunc("POST /aep-resource-definitions", makeCreateHandler(state))
+	mux.HandleFunc("GET /aep-resource-definitions", makeListHandler(state))
+	mux.HandleFunc("GET /aep-resource-definitions/{id}", makeGetHandler(state))
+	mux.HandleFunc("PATCH /aep-resource-definitions/{id}", makeUpdateHandler(state))
+	mux.HandleFunc("DELETE /aep-resource-definitions/{id}", makeDeleteHandler(state))
 }
 
 func makeCreateHandler(state StateManager) http.HandlerFunc {
@@ -59,7 +59,7 @@ func makeCreateHandler(state StateManager) http.HandlerFunc {
 			id = def.Singular
 		}
 		def.ID = id
-		def.Path = "resources/" + id
+		def.Path = "aep-resource-definitions/" + id
 		now := time.Now().UTC().Format(time.RFC3339)
 		def.CreateTime = now
 		def.UpdateTime = now
@@ -80,11 +80,11 @@ func makeCreateHandler(state StateManager) http.HandlerFunc {
 		// Check uniqueness.
 		existing, _ := getDefinitionByID(state.GetDB(), id)
 		if existing != nil {
-			writeError(w, http.StatusConflict, fmt.Sprintf("resource with id %q already exists", id))
+			writeError(w, http.StatusConflict, fmt.Sprintf("definition with id %q already exists", id))
 			return
 		}
 
-		// Persist to _resources.
+		// Persist to _aep_resource_definitions.
 		if err := insertDefinition(state.GetDB(), &def); err != nil {
 			writeError(w, http.StatusInternalServerError, fmt.Sprintf("saving definition: %v", err))
 			return
@@ -106,14 +106,14 @@ func makeCreateHandler(state StateManager) http.HandlerFunc {
 
 func makeGetHandler(state StateManager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		id := r.PathValue("resource")
+		id := r.PathValue("id")
 		def, err := getDefinitionByID(state.GetDB(), id)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, fmt.Sprintf("database error: %v", err))
 			return
 		}
 		if def == nil {
-			writeError(w, http.StatusNotFound, fmt.Sprintf("resource %q not found", id))
+			writeError(w, http.StatusNotFound, fmt.Sprintf("definition %q not found", id))
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -169,14 +169,14 @@ func makeListHandler(state StateManager) http.HandlerFunc {
 
 func makeUpdateHandler(state StateManager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		id := r.PathValue("resource")
+		id := r.PathValue("id")
 		existing, err := getDefinitionByID(state.GetDB(), id)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, fmt.Sprintf("database error: %v", err))
 			return
 		}
 		if existing == nil {
-			writeError(w, http.StatusNotFound, fmt.Sprintf("resource %q not found", id))
+			writeError(w, http.StatusNotFound, fmt.Sprintf("definition %q not found", id))
 			return
 		}
 
@@ -251,14 +251,14 @@ func makeUpdateHandler(state StateManager) http.HandlerFunc {
 
 func makeDeleteHandler(state StateManager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		id := r.PathValue("resource")
+		id := r.PathValue("id")
 		existing, err := getDefinitionByID(state.GetDB(), id)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, fmt.Sprintf("database error: %v", err))
 			return
 		}
 		if existing == nil {
-			writeError(w, http.StatusNotFound, fmt.Sprintf("resource %q not found", id))
+			writeError(w, http.StatusNotFound, fmt.Sprintf("definition %q not found", id))
 			return
 		}
 
@@ -276,26 +276,26 @@ func makeDeleteHandler(state StateManager) http.HandlerFunc {
 	}
 }
 
-// --- SQL helpers for _resources ---
+// --- SQL helpers for _aep_resource_definitions ---
 
 func insertDefinition(db *sql.DB, def *ResourceDefinition) error {
 	schemaJSON, _ := json.Marshal(def.Schema)
 	parentsJSON, _ := json.Marshal(def.Parents)
 	examplesJSON, _ := json.Marshal(def.Examples)
 	_, err := db.Exec(
-		"INSERT INTO _resources (id, singular, plural, description, examples_json, schema_json, parents_json, create_time, update_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		"INSERT INTO _aep_resource_definitions (id, singular, plural, description, examples_json, schema_json, parents_json, create_time, update_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
 		def.ID, def.Singular, def.Plural, def.Description, string(examplesJSON), string(schemaJSON), string(parentsJSON), def.CreateTime, def.UpdateTime,
 	)
 	return err
 }
 
 func getDefinitionByID(db *sql.DB, id string) (*ResourceDefinition, error) {
-	row := db.QueryRow("SELECT id, singular, plural, description, examples_json, schema_json, parents_json, create_time, update_time FROM _resources WHERE id = ?", id)
+	row := db.QueryRow("SELECT id, singular, plural, description, examples_json, schema_json, parents_json, create_time, update_time FROM _aep_resource_definitions WHERE id = ?", id)
 	return scanDefinition(row)
 }
 
 func getDefinition(db *sql.DB, singular string) (*ResourceDefinition, error) {
-	row := db.QueryRow("SELECT id, singular, plural, description, examples_json, schema_json, parents_json, create_time, update_time FROM _resources WHERE singular = ?", singular)
+	row := db.QueryRow("SELECT id, singular, plural, description, examples_json, schema_json, parents_json, create_time, update_time FROM _aep_resource_definitions WHERE singular = ?", singular)
 	return scanDefinition(row)
 }
 
@@ -312,7 +312,7 @@ func scanDefinition(row *sql.Row) (*ResourceDefinition, error) {
 	json.Unmarshal([]byte(schemaJSON), &def.Schema)
 	json.Unmarshal([]byte(parentsJSON), &def.Parents)
 	json.Unmarshal([]byte(examplesJSON), &def.Examples)
-	def.Path = "resources/" + def.ID
+	def.Path = "aep-resource-definitions/" + def.ID
 	return &def, nil
 }
 
@@ -321,12 +321,12 @@ func listDefinitions(db *sql.DB, limit int, cursor string) ([]ResourceDefinition
 	var err error
 	if cursor != "" {
 		rows, err = db.Query(
-			"SELECT id, singular, plural, description, examples_json, schema_json, parents_json, create_time, update_time FROM _resources WHERE id > ? ORDER BY id LIMIT ?",
+			"SELECT id, singular, plural, description, examples_json, schema_json, parents_json, create_time, update_time FROM _aep_resource_definitions WHERE id > ? ORDER BY id LIMIT ?",
 			cursor, limit,
 		)
 	} else {
 		rows, err = db.Query(
-			"SELECT id, singular, plural, description, examples_json, schema_json, parents_json, create_time, update_time FROM _resources ORDER BY id LIMIT ?",
+			"SELECT id, singular, plural, description, examples_json, schema_json, parents_json, create_time, update_time FROM _aep_resource_definitions ORDER BY id LIMIT ?",
 			limit,
 		)
 	}
@@ -345,7 +345,7 @@ func listDefinitions(db *sql.DB, limit int, cursor string) ([]ResourceDefinition
 		json.Unmarshal([]byte(schemaJSON), &def.Schema)
 		json.Unmarshal([]byte(parentsJSON), &def.Parents)
 		json.Unmarshal([]byte(examplesJSON), &def.Examples)
-		def.Path = "resources/" + def.ID
+		def.Path = "aep-resource-definitions/" + def.ID
 		defs = append(defs, def)
 	}
 	return defs, nil
@@ -355,14 +355,14 @@ func updateDefinition(db *sql.DB, def *ResourceDefinition) error {
 	schemaJSON, _ := json.Marshal(def.Schema)
 	examplesJSON, _ := json.Marshal(def.Examples)
 	_, err := db.Exec(
-		"UPDATE _resources SET description = ?, examples_json = ?, schema_json = ?, update_time = ? WHERE id = ?",
+		"UPDATE _aep_resource_definitions SET description = ?, examples_json = ?, schema_json = ?, update_time = ? WHERE id = ?",
 		def.Description, string(examplesJSON), string(schemaJSON), def.UpdateTime, def.ID,
 	)
 	return err
 }
 
 func deleteDefinition(db *sql.DB, id string) error {
-	_, err := db.Exec("DELETE FROM _resources WHERE id = ?", id)
+	_, err := db.Exec("DELETE FROM _aep_resource_definitions WHERE id = ?", id)
 	return err
 }
 

@@ -18,18 +18,18 @@ fi
 echo "=== Bookstore Demo ==="
 echo ""
 
-# --- Step 1: Create resource definitions ---
-echo "--- Creating resource definitions ---"
+# --- Step 1: Create resource aep-resource-definitions ---
+echo "--- Creating resource aep-resource-definitions ---"
 
-echo "Creating publisher resource..."
-aepcli "$API" resource create publisher \
+echo "Creating publisher aep-resource-definition..."
+aepcli "$API" aep-resource-definition create publisher \
   --singular publisher \
   --plural publishers \
   --schema '{"type":"object","properties":{"name":{"type":"string"},"location":{"type":"string"}}}'
 
 echo ""
-echo "Creating book resource (child of publisher)..."
-aepcli "$API" resource create book \
+echo "Creating book aep-resource-definition (child of publisher)..."
+aepcli "$API" aep-resource-definition create book \
   --singular book \
   --plural books \
   --schema '{"type":"object","properties":{"title":{"type":"string"},"author":{"type":"string"},"published":{"type":"boolean"},"purchase_count":{"type":"integer"}}}' \
