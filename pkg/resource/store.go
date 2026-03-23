@@ -7,7 +7,9 @@ import (
 	"strings"
 
 	"github.com/aep-dev/aep-lib-go/pkg/openapi"
+	"github.com/aep-dev/aepbase/pkg/cel2sql"
 	"github.com/aep-dev/aepbase/pkg/db"
+	"github.com/google/cel-go/cel"
 )
 
 type StoredResource struct {
@@ -95,12 +97,14 @@ func List(d *sql.DB, plural string, parentIDs map[string]string, schema *openapi
 		}
 	}
 
-	// Simple filter support: "field=value" expressions joined by " AND ".
+	// CEL filter support: parse CEL expression and convert to SQL.
 	if filter != "" {
-		filterClauses := parseFilter(filter, schema)
-		for _, fc := range filterClauses {
-			whereClauses = append(whereClauses, fmt.Sprintf("%s = ?", fc.column))
-			args = append(args, fc.value)
+		sqlFilter, err := celFilterToSQL(filter, schema)
+		if err != nil {
+			return nil, "", fmt.Errorf("invalid filter: %w", err)
+		}
+		if sqlFilter != "" {
+			whereClauses = append(whereClauses, sqlFilter)
 		}
 	}
 
@@ -160,37 +164,36 @@ func List(d *sql.DB, plural string, parentIDs map[string]string, schema *openapi
 	return results, nextPageToken, nil
 }
 
-// filterClause represents a single parsed filter condition.
-type filterClause struct {
-	column string
-	value  string
-}
-
-// parseFilter parses a simple filter string of "field=value" expressions joined by " AND ".
-// Only fields that exist in the schema (and are not standard fields) are accepted.
-func parseFilter(filter string, schema *openapi.Schema) []filterClause {
-	var clauses []filterClause
-	parts := strings.Split(filter, " AND ")
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		eqIdx := strings.Index(part, "=")
-		if eqIdx < 0 {
+// celFilterToSQL compiles a CEL filter expression and converts it to a SQL
+// WHERE clause. The CEL environment is built from the schema properties so
+// only known fields can be referenced.
+func celFilterToSQL(filter string, schema *openapi.Schema) (string, error) {
+	var opts []cel.EnvOption
+	for name, prop := range schema.Properties {
+		if standardFields[name] {
 			continue
 		}
-		field := strings.TrimSpace(part[:eqIdx])
-		value := strings.TrimSpace(part[eqIdx+1:])
-		// Strip surrounding quotes if present.
-		if len(value) >= 2 && value[0] == '\'' && value[len(value)-1] == '\'' {
-			value = value[1 : len(value)-1]
-		} else if len(value) >= 2 && value[0] == '"' && value[len(value)-1] == '"' {
-			value = value[1 : len(value)-1]
-		}
-		// Only allow filtering on known schema properties.
-		if _, ok := schema.Properties[field]; ok && !standardFields[field] {
-			clauses = append(clauses, filterClause{column: field, value: value})
-		}
+		opts = append(opts, cel.Variable(name, schemaTypeToCEL(prop.Type)))
 	}
-	return clauses
+	env, err := cel.NewEnv(opts...)
+	if err != nil {
+		return "", fmt.Errorf("creating CEL environment: %w", err)
+	}
+	return cel2sql.Convert(env, filter)
+}
+
+// schemaTypeToCEL maps OpenAPI schema types to CEL types.
+func schemaTypeToCEL(schemaType string) *cel.Type {
+	switch schemaType {
+	case "integer":
+		return cel.IntType
+	case "number":
+		return cel.DoubleType
+	case "boolean":
+		return cel.BoolType
+	default:
+		return cel.StringType
+	}
 }
 
 func Update(d *sql.DB, plural string, path string, fields map[string]any, updateTime string, schema *openapi.Schema) error {

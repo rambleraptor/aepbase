@@ -1452,8 +1452,8 @@ func TestListWithFilter(t *testing.T) {
 	doRequest(t, h, "POST", "/publishers?id=beta", `{"name":"Beta","location":"LA"}`)
 	doRequest(t, h, "POST", "/publishers?id=gamma", `{"name":"Gamma","location":"NYC"}`)
 
-	// Filter by location=NYC.
-	resp := doRequest(t, h, "GET", "/publishers?filter=location%3D'NYC'", "")
+	// Filter by location == "NYC" (CEL syntax).
+	resp := doRequest(t, h, "GET", "/publishers?filter=location+%3D%3D+'NYC'", "")
 	if resp.StatusCode != 200 {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
