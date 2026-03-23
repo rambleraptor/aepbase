@@ -1,4 +1,4 @@
-module github.com/aep-dev/aepbase
+module github.com/rambleraptor/aepbase
 
 go 1.23.0
 

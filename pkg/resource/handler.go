@@ -14,7 +14,7 @@ import (
 	"github.com/aep-dev/aep-lib-go/pkg/api"
 	"github.com/aep-dev/aep-lib-go/pkg/openapi"
 
-	"github.com/aep-dev/aepbase/pkg/db"
+	"github.com/rambleraptor/aepbase/pkg/db"
 )
 
 // CustomMethodHandler holds the handler and HTTP method for a custom method.

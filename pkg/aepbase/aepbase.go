@@ -11,9 +11,9 @@ import (
 	"github.com/aep-dev/aep-lib-go/pkg/api"
 	"github.com/aep-dev/aep-lib-go/pkg/openapi"
 
-	"github.com/aep-dev/aepbase/pkg/db"
-	"github.com/aep-dev/aepbase/pkg/meta"
-	"github.com/aep-dev/aepbase/pkg/resource"
+	"github.com/rambleraptor/aepbase/pkg/db"
+	"github.com/rambleraptor/aepbase/pkg/meta"
+	"github.com/rambleraptor/aepbase/pkg/resource"
 )
 
 // CustomMethodConfig defines a custom method to register on a resource.
@@ -64,7 +64,7 @@ func NewState(d *sql.DB, serverURL string) *State {
 			Resources: make(map[string]*api.Resource),
 			Contact: &api.Contact{
 				Name: "aepbase",
-				URL:  "https://github.com/aep-dev/aepbase",
+				URL:  "https://github.com/rambleraptor/aepbase",
 			},
 		},
 		resourceDescriptions: map[string]string{
