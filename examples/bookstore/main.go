@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/aep-dev/aep-lib-go/pkg/openapi"
 	"github.com/aep-dev/aepbase/pkg/aepbase"
@@ -53,6 +54,27 @@ func main() {
 					},
 				},
 				Handler: makePurchaseHandler,
+			},
+			{
+				ResourceSingular: "book",
+				MethodName:       "write",
+				Method:           "POST",
+				Async:            true,
+				RequestSchema: &openapi.Schema{
+					Type: "object",
+					Properties: openapi.Properties{
+						"chapters": {Type: "integer"},
+					},
+				},
+				ResponseSchema: &openapi.Schema{
+					Type: "object",
+					Properties: openapi.Properties{
+						"id":       {Type: "string"},
+						"chapters": {Type: "integer"},
+						"status":   {Type: "string"},
+					},
+				},
+				Handler: makeWriteHandler,
 			},
 		},
 	}
@@ -143,6 +165,39 @@ func makePurchaseHandler(d *sql.DB) http.HandlerFunc {
 			"id":             bookID,
 			"purchase_count": newCount,
 			"quantity":       quantity,
+		})
+	}
+}
+
+// makeWriteHandler simulates a long-running book writing process.
+// Because it's registered with Async: true, the framework runs this handler
+// in the background and returns an Operation to the caller immediately.
+func makeWriteHandler(d *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		bookID := r.PathValue("book_id")
+
+		var body map[string]any
+		json.NewDecoder(r.Body).Decode(&body)
+
+		chapters := 10
+		if c, ok := body["chapters"]; ok {
+			if cf, ok := c.(float64); ok {
+				chapters = int(cf)
+			}
+		}
+
+		// Simulate long-running work (1 second per chapter, capped at 5s).
+		duration := time.Duration(chapters) * time.Second
+		if duration > 5*time.Second {
+			duration = 5 * time.Second
+		}
+		time.Sleep(duration)
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"id":       bookID,
+			"chapters": chapters,
+			"status":   "written",
 		})
 	}
 }
