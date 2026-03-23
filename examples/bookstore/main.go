@@ -9,8 +9,8 @@ import (
 	"net/http"
 
 	"github.com/aep-dev/aep-lib-go/pkg/openapi"
-	"github.com/aep-dev/aepbase/pkg/aepbase"
-	"github.com/aep-dev/aepbase/pkg/resource"
+	"github.com/rambleraptor/aepbase/pkg/aepbase"
+	"github.com/rambleraptor/aepbase/pkg/resource"
 )
 
 func main() {

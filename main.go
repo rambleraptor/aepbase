@@ -4,7 +4,7 @@ import (
 	"flag"
 	"log"
 
-	"github.com/aep-dev/aepbase/pkg/aepbase"
+	"github.com/rambleraptor/aepbase/pkg/aepbase"
 )
 
 func main() {
