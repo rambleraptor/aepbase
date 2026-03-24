@@ -7,8 +7,8 @@ import (
 	"strings"
 
 	"github.com/aep-dev/aep-lib-go/pkg/openapi"
-	"github.com/aep-dev/aepbase/pkg/cel2sql"
-	"github.com/aep-dev/aepbase/pkg/db"
+	"github.com/rambleraptor/aepbase/pkg/cel2sql"
+	"github.com/rambleraptor/aepbase/pkg/db"
 	"github.com/google/cel-go/cel"
 )
 
