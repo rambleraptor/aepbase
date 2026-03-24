@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -23,6 +24,7 @@ type ServerOptions struct {
 	InMemory           bool
 	CORSAllowedOrigins []string
 	CustomMethods      []CustomMethodOption
+	ExportResources    bool
 	corsRaw            string
 }
 
@@ -59,6 +61,7 @@ func (o *ServerOptions) RegisterFlags() {
 	flag.StringVar(&o.DataDir, "data-dir", o.DataDir, "directory for database files")
 	flag.StringVar(&o.DBFile, "db", o.DBFile, "database file name")
 	flag.StringVar(&o.corsRaw, "cors-allowed-origins", "", "comma-separated list of allowed CORS origins (e.g. \"https://ui.aep.dev,http://localhost:3000\")")
+	flag.BoolVar(&o.ExportResources, "export-resources", false, "output the OpenAPI spec for user-defined resources only (excludes built-in endpoints) and exit")
 }
 
 // Run initializes the database, loads existing resources, registers custom
@@ -106,6 +109,17 @@ func Run(opts ServerOptions) error {
 			return fmt.Errorf("failed to restore resource %q: %v", def.Singular, err)
 		}
 		log.Printf("restored resource: %s (%s)", def.Singular, def.Plural)
+	}
+
+	// If --export-resources is set, output the filtered OpenAPI spec and exit.
+	if opts.ExportResources {
+		jsonBytes, err := state.ExportUserResourcesOpenAPI()
+		if err != nil {
+			return fmt.Errorf("failed to export OpenAPI spec: %v", err)
+		}
+		os.Stdout.Write(jsonBytes)
+		os.Stdout.Write([]byte("\n"))
+		return nil
 	}
 
 	// Register custom methods.

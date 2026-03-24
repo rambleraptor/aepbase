@@ -417,6 +417,54 @@ func (s *State) serveOpenAPI(w http.ResponseWriter, r *http.Request) {
 	w.Write(jsonBytes)
 }
 
+// builtinResources is the set of resource singular names that are built-in
+// and should be excluded from the exported OpenAPI spec.
+var builtinResources = map[string]bool{
+	metaResourceSingular:      true,
+	operationResourceSingular: true,
+}
+
+// ExportUserResourcesOpenAPI generates the OpenAPI spec filtered to only
+// user-defined resources, excluding built-in endpoints like
+// /aep-resource-definitions and /operations.
+func (s *State) ExportUserResourcesOpenAPI() ([]byte, error) {
+	s.mu.RLock()
+	// Build a filtered copy of the API with only user-defined resources.
+	filtered := &api.API{
+		ServerURL: s.API.ServerURL,
+		Name:      s.API.Name,
+		Contact:   s.API.Contact,
+		Resources: make(map[string]*api.Resource),
+	}
+	descriptions := make(map[string]string)
+	examples := make(map[string]map[string]any)
+	for k, v := range s.API.Resources {
+		if builtinResources[k] {
+			continue
+		}
+		filtered.Resources[k] = v
+	}
+	for k, v := range s.resourceDescriptions {
+		if builtinResources[k] {
+			continue
+		}
+		descriptions[k] = v
+	}
+	for k, v := range s.resourceExamples {
+		if builtinResources[k] {
+			continue
+		}
+		examples[k] = v
+	}
+	s.mu.RUnlock()
+
+	jsonBytes, err := filtered.ConvertToOpenAPIBytes()
+	if err != nil {
+		return nil, err
+	}
+	return enrichOpenAPI(jsonBytes, filtered.Name, descriptions, examples)
+}
+
 // errorResponseSchema returns a reusable error response schema.
 func errorResponseSchema() map[string]any {
 	return map[string]any{
