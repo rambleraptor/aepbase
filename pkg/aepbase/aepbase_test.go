@@ -1854,6 +1854,58 @@ func TestAsyncCustomMethodPending(t *testing.T) {
 	}
 }
 
+func TestExportUserResourcesOpenAPI(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+
+	// Add a user-defined resource.
+	createResource(t, h, "book", "book", "books", nil, map[string]any{
+		"title":  map[string]any{"type": "string"},
+		"author": map[string]any{"type": "string"},
+	})
+
+	// Generate the filtered spec.
+	jsonBytes, err := state.ExportUserResourcesOpenAPI()
+	if err != nil {
+		t.Fatalf("ExportUserResourcesOpenAPI: %v", err)
+	}
+
+	var doc map[string]any
+	if err := json.Unmarshal(jsonBytes, &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	// Paths should include /books but not /aep-resource-definitions or /operations.
+	paths, _ := doc["paths"].(map[string]any)
+	if paths == nil {
+		t.Fatal("expected paths in OpenAPI spec")
+	}
+	for path := range paths {
+		if strings.Contains(path, "aep-resource-definition") {
+			t.Errorf("exported spec should not contain built-in path %q", path)
+		}
+		if strings.Contains(path, "operation") {
+			t.Errorf("exported spec should not contain built-in path %q", path)
+		}
+	}
+	if _, ok := paths["/books"]; !ok {
+		t.Error("exported spec should contain /books path")
+	}
+
+	// Schemas should include book but not aep-resource-definition or operation.
+	components, _ := doc["components"].(map[string]any)
+	schemas, _ := components["schemas"].(map[string]any)
+	if _, ok := schemas["book"]; !ok {
+		t.Error("exported spec should contain book schema")
+	}
+	if _, ok := schemas["aep-resource-definition"]; ok {
+		t.Error("exported spec should not contain aep-resource-definition schema")
+	}
+	if _, ok := schemas["operation"]; ok {
+		t.Error("exported spec should not contain operation schema")
+	}
+}
+
 // Ensure unused imports are consumed.
 var _ = (*sql.DB)(nil)
 var _ = meta.ResourceDefinition{}
