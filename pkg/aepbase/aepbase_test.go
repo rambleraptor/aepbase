@@ -1,6 +1,7 @@
 package aepbase_test
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -8,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aep-dev/aep-lib-go/pkg/openapi"
 	"github.com/rambleraptor/aepbase/pkg/aepbase"
@@ -658,9 +660,15 @@ func TestOpenAPIAfterDelete(t *testing.T) {
 	if !ok {
 		paths = map[string]any{}
 	}
-	// After deleting the user resource, only the built-in meta resource paths should remain.
+	// After deleting the user resource, only the built-in meta and operation paths should remain.
+	builtinPaths := map[string]bool{
+		"/aep-resource-definitions":                          true,
+		"/aep-resource-definitions/{aep_resource_definition_id}": true,
+		"/operations":                  true,
+		"/operations/{operation_id}":   true,
+	}
 	for p := range paths {
-		if p != "/aep-resource-definitions" && p != "/aep-resource-definitions/{aep_resource_definition_id}" {
+		if !builtinPaths[p] {
 			t.Errorf("unexpected path %q after deleting resource", p)
 		}
 	}
@@ -1618,3 +1626,234 @@ func TestDeleteResourceWithGrandchildren(t *testing.T) {
 		t.Errorf("expected 204 deleting publisher, got %d", resp.StatusCode)
 	}
 }
+
+// --- Operations Tests ---
+
+func TestOperationsListEmpty(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+
+	resp := doRequest(t, h, "GET", "/operations", "")
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	m := readJSON(t, resp)
+	results := m["results"].([]any)
+	if len(results) != 0 {
+		t.Errorf("expected empty results, got %d", len(results))
+	}
+}
+
+func TestOperationsGetNotFound(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+
+	resp := doRequest(t, h, "GET", "/operations/nonexistent", "")
+	if resp.StatusCode != 404 {
+		t.Fatalf("expected 404, got %d", resp.StatusCode)
+	}
+}
+
+func TestAsyncCustomMethod(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+
+	// Create a resource.
+	createResource(t, h, "book", "book", "books", nil, map[string]any{
+		"title": map[string]any{"type": "string"},
+	})
+
+	// Register an async custom method.
+	err := state.AddCustomMethod("book", "write", aepbase.CustomMethodConfig{
+		Method: "POST",
+		Async:  true,
+		RequestSchema: &openapi.Schema{
+			Type:       "object",
+			Properties: openapi.Properties{},
+		},
+		ResponseSchema: &openapi.Schema{
+			Type: "object",
+			Properties: openapi.Properties{
+				"status": {Type: "string"},
+			},
+		},
+		Handler: func(w http.ResponseWriter, r *http.Request) {
+			time.Sleep(100 * time.Millisecond)
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{
+				"status": "written",
+			})
+		},
+	})
+	if err != nil {
+		t.Fatalf("AddCustomMethod: %v", err)
+	}
+
+	// Create a book first.
+	doRequest(t, h, "POST", "/books?id=book1", `{"title":"Test Book"}`)
+
+	// Call the async custom method.
+	resp := doRequest(t, h, "POST", "/books/book1:write", `{}`)
+	if resp.StatusCode != 202 {
+		m := readJSON(t, resp)
+		t.Fatalf("expected 202, got %d: %v", resp.StatusCode, m)
+	}
+
+	op := readJSON(t, resp)
+	if op["done"] != false {
+		t.Errorf("expected done=false, got %v", op["done"])
+	}
+	opPath, ok := op["path"].(string)
+	if !ok || !strings.HasPrefix(opPath, "operations/") {
+		t.Fatalf("expected operation path, got %v", op["path"])
+	}
+
+	// Poll the operation until done.
+	opID := op["id"].(string)
+	var finalOp map[string]any
+	for range 50 {
+		time.Sleep(50 * time.Millisecond)
+		pollResp := doRequest(t, h, "GET", "/operations/"+opID, "")
+		if pollResp.StatusCode != 200 {
+			t.Fatalf("polling operation: status %d", pollResp.StatusCode)
+		}
+		finalOp = readJSON(t, pollResp)
+		if finalOp["done"] == true {
+			break
+		}
+	}
+	if finalOp["done"] != true {
+		t.Fatalf("operation did not complete in time")
+	}
+
+	// Check the response.
+	response, ok := finalOp["response"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected response map, got %v", finalOp["response"])
+	}
+	if response["status"] != "written" {
+		t.Errorf("expected status=written, got %v", response["status"])
+	}
+
+	// Verify the operation appears in list.
+	listResp := doRequest(t, h, "GET", "/operations", "")
+	listBody := readJSON(t, listResp)
+	results := listBody["results"].([]any)
+	if len(results) != 1 {
+		t.Errorf("expected 1 operation in list, got %d", len(results))
+	}
+}
+
+func TestAsyncCustomMethodError(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+
+	createResource(t, h, "book", "book", "books", nil, map[string]any{
+		"title": map[string]any{"type": "string"},
+	})
+
+	err := state.AddCustomMethod("book", "fail", aepbase.CustomMethodConfig{
+		Method: "POST",
+		Async:  true,
+		RequestSchema: &openapi.Schema{
+			Type:       "object",
+			Properties: openapi.Properties{},
+		},
+		ResponseSchema: &openapi.Schema{
+			Type:       "object",
+			Properties: openapi.Properties{},
+		},
+		Handler: func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]any{
+				"error": map[string]any{
+					"code":    500,
+					"message": "something went wrong",
+				},
+			})
+		},
+	})
+	if err != nil {
+		t.Fatalf("AddCustomMethod: %v", err)
+	}
+
+	doRequest(t, h, "POST", "/books?id=book1", `{"title":"Test"}`)
+	resp := doRequest(t, h, "POST", "/books/book1:fail", `{}`)
+	if resp.StatusCode != 202 {
+		t.Fatalf("expected 202, got %d", resp.StatusCode)
+	}
+
+	op := readJSON(t, resp)
+	opID := op["id"].(string)
+
+	// Poll until done.
+	var finalOp map[string]any
+	for range 20 {
+		time.Sleep(50 * time.Millisecond)
+		pollResp := doRequest(t, h, "GET", "/operations/"+opID, "")
+		finalOp = readJSON(t, pollResp)
+		if finalOp["done"] == true {
+			break
+		}
+	}
+	if finalOp["done"] != true {
+		t.Fatalf("operation did not complete")
+	}
+
+	// Should have an error, no response.
+	if finalOp["error"] == nil {
+		t.Errorf("expected error to be set")
+	}
+	errMap := finalOp["error"].(map[string]any)
+	if errMap["message"] != "something went wrong" {
+		t.Errorf("expected error message, got %v", errMap["message"])
+	}
+	if finalOp["response"] != nil {
+		t.Errorf("expected nil response on error, got %v", finalOp["response"])
+	}
+}
+
+func TestAsyncCustomMethodPending(t *testing.T) {
+	// Test that async custom methods can be registered before the resource exists.
+	state := newTestState(t)
+	h := state.Handler()
+
+	err := state.AddCustomMethod("book", "write", aepbase.CustomMethodConfig{
+		Method: "POST",
+		Async:  true,
+		RequestSchema: &openapi.Schema{
+			Type:       "object",
+			Properties: openapi.Properties{},
+		},
+		ResponseSchema: &openapi.Schema{
+			Type: "object",
+			Properties: openapi.Properties{
+				"status": {Type: "string"},
+			},
+		},
+		Handler: func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{"status": "done"})
+		},
+	})
+	if err != nil {
+		t.Fatalf("AddCustomMethod: %v", err)
+	}
+
+	// Now create the resource — the pending method should be applied.
+	createResource(t, h, "book", "book", "books", nil, map[string]any{
+		"title": map[string]any{"type": "string"},
+	})
+	doRequest(t, h, "POST", "/books?id=book1", `{"title":"Test"}`)
+
+	resp := doRequest(t, h, "POST", "/books/book1:write", `{}`)
+	if resp.StatusCode != 202 {
+		m := readJSON(t, resp)
+		t.Fatalf("expected 202, got %d: %v", resp.StatusCode, m)
+	}
+}
+
+// Ensure unused imports are consumed.
+var _ = (*sql.DB)(nil)
+var _ = meta.ResourceDefinition{}

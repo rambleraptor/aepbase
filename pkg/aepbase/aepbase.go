@@ -1,18 +1,23 @@
 package aepbase
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/aep-dev/aep-lib-go/pkg/api"
 	"github.com/aep-dev/aep-lib-go/pkg/openapi"
 
 	"github.com/rambleraptor/aepbase/pkg/db"
 	"github.com/rambleraptor/aepbase/pkg/meta"
+	"github.com/rambleraptor/aepbase/pkg/operation"
 	"github.com/rambleraptor/aepbase/pkg/resource"
 )
 
@@ -27,6 +32,10 @@ type CustomMethodConfig struct {
 	// Handler is the HTTP handler for the custom method.
 	// The request will have path values extracted for all parent IDs and the resource ID.
 	Handler http.HandlerFunc
+	// Async, when true, makes this a long-running operation.
+	// The handler runs in the background and callers receive an Operation
+	// resource (HTTP 202) that can be polled for completion.
+	Async bool
 }
 
 // customMethodRegistration stores a registered custom method with its handler.
@@ -53,6 +62,9 @@ type State struct {
 // It is registered in the API for OpenAPI generation but routes are handled
 // separately by the meta package.
 const metaResourceSingular = "aep-resource-definition"
+
+// operationResourceSingular is the singular name for the built-in operation resource.
+const operationResourceSingular = "operation"
 
 func NewState(d *sql.DB, serverURL string) *State {
 	s := &State{
@@ -115,6 +127,31 @@ func NewState(d *sql.DB, serverURL string) *State {
 	}
 	metaResource.API = s.API
 	s.API.Resources[metaResourceSingular] = metaResource
+
+	// Register the operation resource for OpenAPI generation.
+	operationResource := &api.Resource{
+		Singular: "operation",
+		Plural:   "operations",
+		Schema: &openapi.Schema{
+			Type: "object",
+			Properties: openapi.Properties{
+				"id":          {Type: "string", ReadOnly: true, Description: "The unique identifier for this operation."},
+				"path":        {Type: "string", ReadOnly: true, Description: "The full resource path (e.g. operations/abc123)."},
+				"done":        {Type: "boolean", ReadOnly: true, Description: "Whether the operation has completed."},
+				"error":       {Type: "object", ReadOnly: true, Description: "Error details if the operation failed."},
+				"response":    {Type: "object", ReadOnly: true, Description: "The result of the operation, available when done is true."},
+				"create_time": {Type: "string", Format: "date-time", ReadOnly: true, Description: "The time the operation was created."},
+			},
+		},
+		Children: []*api.Resource{},
+		Methods: api.Methods{
+			Get:  &api.GetMethod{},
+			List: &api.ListMethod{},
+		},
+	}
+	operationResource.API = s.API
+	s.API.Resources[operationResourceSingular] = operationResource
+
 	s.rebuildMux()
 	return s
 }
@@ -329,10 +366,11 @@ func (s *State) UpdateResourceSchema(def meta.ResourceDefinition, oldDef meta.Re
 func (s *State) rebuildMux() {
 	mux := http.NewServeMux()
 	meta.RegisterRoutes(mux, s)
+	operation.RegisterRoutes(mux, s.DB)
 	mux.HandleFunc("GET /openapi.json", s.serveOpenAPI)
 	for _, r := range s.API.Resources {
-		// Skip the meta resource — its routes are registered by meta.RegisterRoutes above.
-		if r.Singular == metaResourceSingular {
+		// Skip built-in resources — their routes are registered separately above.
+		if r.Singular == metaResourceSingular || r.Singular == operationResourceSingular {
 			continue
 		}
 		// Collect custom method handlers for this resource.
@@ -866,6 +904,11 @@ func (s *State) addCustomMethodLocked(resourceSingular, methodName string, confi
 		return fmt.Errorf("Handler is required")
 	}
 
+	// Wrap async handlers so callers get an Operation back.
+	if config.Async {
+		config.Handler = s.wrapAsyncHandler(config.Handler)
+	}
+
 	reg := customMethodRegistration{
 		resourceSingular: resourceSingular,
 		methodName:       methodName,
@@ -879,12 +922,19 @@ func (s *State) addCustomMethodLocked(resourceSingular, methodName string, confi
 		return nil
 	}
 
+	// For async methods, the OpenAPI response is the Operation schema wrapping
+	// the original response, and the status code is 202.
+	responseSchema := config.ResponseSchema
+	if config.Async {
+		responseSchema = asyncOperationSchema(config.ResponseSchema)
+	}
+
 	// Add to aep-lib-go's resource for OpenAPI generation.
 	cm := &api.CustomMethod{
 		Name:     methodName,
 		Method:   config.Method,
 		Request:  config.RequestSchema,
-		Response: config.ResponseSchema,
+		Response: responseSchema,
 	}
 	r.CustomMethods = append(r.CustomMethods, cm)
 
@@ -895,6 +945,123 @@ func (s *State) addCustomMethodLocked(resourceSingular, methodName string, confi
 	return nil
 }
 
+// asyncOperationSchema returns an Operation-shaped schema where the response
+// property uses the provided inner schema.
+func asyncOperationSchema(innerResponse *openapi.Schema) *openapi.Schema {
+	return &openapi.Schema{
+		Type: "object",
+		Properties: openapi.Properties{
+			"id":          {Type: "string", ReadOnly: true, Description: "The unique identifier for this operation."},
+			"path":        {Type: "string", ReadOnly: true, Description: "The full resource path (e.g. operations/abc123)."},
+			"done":        {Type: "boolean", ReadOnly: true, Description: "Whether the operation has completed."},
+			"error":       {Type: "object", ReadOnly: true, Description: "Error details if the operation failed."},
+			"response":    *innerResponse,
+			"create_time": {Type: "string", Format: "date-time", ReadOnly: true, Description: "The time the operation was created."},
+		},
+	}
+}
+
 func (s *State) GetDB() *sql.DB {
 	return s.DB
+}
+
+// wrapAsyncHandler wraps a custom method handler to run asynchronously.
+// It creates an Operation, returns 202 immediately, and runs the handler
+// in a background goroutine. When the handler completes, the operation is
+// updated with the response or error.
+func (s *State) wrapAsyncHandler(handler http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		opID := operation.GenerateID()
+		now := time.Now().UTC().Format(time.RFC3339)
+		op := &operation.Operation{
+			ID:         opID,
+			Path:       "operations/" + opID,
+			Done:       false,
+			CreateTime: now,
+		}
+		if err := operation.Insert(s.DB, op); err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":{"code":500,"message":"failed to create operation: %v"}}`, err), http.StatusInternalServerError)
+			return
+		}
+
+		// Buffer the request body so the background goroutine can read it.
+		bodyBytes, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, `{"error":{"code":400,"message":"failed to read request body"}}`, http.StatusBadRequest)
+			return
+		}
+		r.Body.Close()
+
+		go func() {
+			// Build a new request with the buffered body for the background handler.
+			bgReq, _ := http.NewRequest(r.Method, r.URL.String(), bytes.NewReader(bodyBytes))
+			bgReq.Header = r.Header
+			// Copy path values by re-using the original request's pattern result.
+			bgReq.SetPathValue("", "") // initialize the path values map
+			for _, paramName := range extractPathValueNames(r) {
+				bgReq.SetPathValue(paramName, r.PathValue(paramName))
+			}
+
+			recorder := httptest.NewRecorder()
+			handler(recorder, bgReq)
+
+			result := recorder.Result()
+			var respBody any
+			if result.Body != nil {
+				defer result.Body.Close()
+				respBytes, _ := io.ReadAll(result.Body)
+				json.Unmarshal(respBytes, &respBody)
+			}
+
+			if result.StatusCode >= 400 {
+				// Handler returned an error — store it as the operation error.
+				errMap, ok := respBody.(map[string]any)
+				if !ok {
+					errMap = map[string]any{
+						"code":    result.StatusCode,
+						"message": "operation failed",
+					}
+				}
+				// If the response has an "error" wrapper, unwrap it.
+				if inner, ok := errMap["error"].(map[string]any); ok {
+					errMap = inner
+				}
+				operation.MarkDone(s.DB, opID, nil, errMap)
+			} else {
+				operation.MarkDone(s.DB, opID, respBody, nil)
+			}
+		}()
+
+		// Return 202 with the operation.
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		json.NewEncoder(w).Encode(op.ToMap())
+	}
+}
+
+// extractPathValueNames returns the path value parameter names set on a request.
+// Go's net/http doesn't expose path value names directly, so we track them
+// based on the resource's pattern elements.
+func extractPathValueNames(r *http.Request) []string {
+	// Try common parameter names from the URL pattern.
+	// The path value map is not exported, so we probe known suffixes.
+	var names []string
+	// Walk through the URL pattern to find {param} names.
+	pattern := r.Pattern
+	for {
+		start := strings.Index(pattern, "{")
+		if start < 0 {
+			break
+		}
+		end := strings.Index(pattern[start:], "}")
+		if end < 0 {
+			break
+		}
+		name := pattern[start+1 : start+end]
+		// Strip trailing ... for catch-all patterns.
+		name = strings.TrimSuffix(name, "...")
+		names = append(names, name)
+		pattern = pattern[start+end+1:]
+	}
+	return names
 }

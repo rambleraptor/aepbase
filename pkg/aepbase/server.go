@@ -36,6 +36,10 @@ type CustomMethodOption struct {
 	RequestSchema    *openapi.Schema
 	ResponseSchema   *openapi.Schema
 	Handler          func(*sql.DB) http.HandlerFunc
+	// Async, when true, makes this a long-running operation.
+	// The handler runs in the background and callers receive an Operation
+	// resource (HTTP 202) that can be polled for completion.
+	Async bool
 }
 
 // RegisterFlags registers CLI flags for the server options.
@@ -111,6 +115,7 @@ func Run(opts ServerOptions) error {
 			RequestSchema:  cm.RequestSchema,
 			ResponseSchema: cm.ResponseSchema,
 			Handler:        cm.Handler(d),
+			Async:          cm.Async,
 		}); err != nil {
 			return fmt.Errorf("failed to register custom method %q: %v", cm.MethodName, err)
 		}
