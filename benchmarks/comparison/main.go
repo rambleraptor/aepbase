@@ -1,11 +1,11 @@
 // Package main implements a benchmark comparing Aepbase (structured API) vs
-// OpenClaw-style memory (markdown files) for storing and querying structured
-// data like HSA receipts.
+// SQLite (direct SQL queries) vs OpenClaw-style memory (markdown files) for
+// storing and querying structured data like HSA receipts.
 //
 // It measures:
 //   - Token cost: how many LLM tokens each approach consumes per operation
 //   - Accuracy: whether the LLM returns correct answers for structured queries
-//   - Scaling: how both approaches behave as record count grows
+//   - Scaling: how all three approaches behave as record count grows
 //
 // Usage:
 //
@@ -20,6 +20,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -35,6 +36,7 @@ import (
 	"time"
 
 	"github.com/aep-dev/aepbase/pkg/aepbase"
+	_ "modernc.org/sqlite"
 )
 
 // Receipt represents an HSA receipt used as seed data.
@@ -58,7 +60,7 @@ type Query struct {
 // Result captures metrics for a single query execution.
 type Result struct {
 	Query          string
-	Approach       string // "aepbase" or "openclaw"
+	Approach       string // "aepbase", "sqlite", or "openclaw"
 	RecordCount    int
 	InputTokens    int
 	OutputTokens   int
@@ -115,6 +117,9 @@ func main() {
 		// Build the markdown memory file content.
 		markdownMemory := buildMarkdownMemory(receipts)
 
+		// Seed an in-memory SQLite database.
+		sqliteDB := seedSQLite(receipts)
+
 		// Build queries with expected answers based on actual data.
 		queries := buildQueries(receipts)
 
@@ -130,7 +135,14 @@ func main() {
 			openclawPrompt := buildOpenclawPrompt(q, markdownMemory)
 			ocResult := runQuery(apiKey, openclawPrompt, q, "openclaw", count)
 			allResults = append(allResults, ocResult)
+
+			// --- SQLite approach ---
+			sqlitePrompt := buildSQLitePrompt(q, sqliteDB)
+			sqlResult := runQuery(apiKey, sqlitePrompt, q, "sqlite", count)
+			allResults = append(allResults, sqlResult)
 		}
+
+		sqliteDB.Close()
 	}
 
 	// Output results.
@@ -532,10 +544,107 @@ func parseRecordSizes(s string) []int {
 	return sizes
 }
 
+// seedSQLite creates an in-memory SQLite database and inserts the receipts.
+func seedSQLite(receipts []Receipt) *sql.DB {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		log.Fatalf("open sqlite: %v", err)
+	}
+	_, err = db.Exec(`CREATE TABLE receipts (
+		id TEXT PRIMARY KEY,
+		provider TEXT NOT NULL,
+		amount REAL NOT NULL,
+		date TEXT NOT NULL,
+		category TEXT NOT NULL,
+		reimbursed INTEGER NOT NULL,
+		description TEXT
+	)`)
+	if err != nil {
+		log.Fatalf("create table: %v", err)
+	}
+	for _, r := range receipts {
+		reimbursed := 0
+		if r.Reimbursed {
+			reimbursed = 1
+		}
+		_, err := db.Exec(`INSERT INTO receipts (id, provider, amount, date, category, reimbursed, description) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			r.ID, r.Provider, r.Amount, r.Date, r.Category, reimbursed, r.Description)
+		if err != nil {
+			log.Fatalf("insert receipt %s: %v", r.ID, err)
+		}
+	}
+	return db
+}
+
+// querySQLite executes a SQL query and returns the results as a formatted string.
+func querySQLite(db *sql.DB, query string) string {
+	rows, err := db.Query(query)
+	if err != nil {
+		return fmt.Sprintf("ERROR: %v", err)
+	}
+	defer rows.Close()
+
+	cols, _ := rows.Columns()
+	var sb strings.Builder
+	sb.WriteString(strings.Join(cols, "\t"))
+	sb.WriteString("\n")
+
+	for rows.Next() {
+		vals := make([]any, len(cols))
+		ptrs := make([]any, len(cols))
+		for i := range vals {
+			ptrs[i] = &vals[i]
+		}
+		rows.Scan(ptrs...)
+		strs := make([]string, len(cols))
+		for i, v := range vals {
+			strs[i] = fmt.Sprintf("%v", v)
+		}
+		sb.WriteString(strings.Join(strs, "\t"))
+		sb.WriteString("\n")
+	}
+	return sb.String()
+}
+
+// buildSQLitePrompt constructs the prompt for the SQLite approach.
+// The LLM gets pre-executed SQL query results, simulating a tool-use flow
+// where the LLM would write and execute SQL against the database.
+func buildSQLitePrompt(q Query, db *sql.DB) string {
+	var sqlQuery string
+	switch q.Name {
+	case "count_unreimbursed_over_100":
+		sqlQuery = `SELECT id, provider, amount, date, category, reimbursed FROM receipts WHERE reimbursed = 0 AND amount > 100`
+	case "provider_total":
+		sqlQuery = `SELECT id, provider, amount, date, category FROM receipts WHERE provider = 'Dr. Smith'`
+	case "category_count":
+		sqlQuery = `SELECT id, provider, amount, date, category FROM receipts WHERE category = 'dental'`
+	case "largest_receipt":
+		sqlQuery = `SELECT id, provider, amount, date, category FROM receipts ORDER BY amount DESC`
+	case "count_by_year":
+		sqlQuery = `SELECT id, provider, amount, date, category FROM receipts WHERE date LIKE '2025%'`
+	}
+
+	result := querySQLite(db, sqlQuery)
+
+	return fmt.Sprintf(`You are a data assistant. You have access to a SQLite database with an HSA receipts table.
+
+The table schema is:
+  receipts (id TEXT, provider TEXT, amount REAL, date TEXT, category TEXT, reimbursed INTEGER, description TEXT)
+
+The following is the result of a SQL query against the database:
+
+SQL: %s
+
+%s
+Based on this data, answer the following question:
+
+%s`, sqlQuery, result, q.Prompt)
+}
+
 // printTable outputs results as a formatted table.
 func printTable(results []Result) {
 	fmt.Println()
-	fmt.Println("=== Aepbase vs OpenClaw Benchmark Results ===")
+	fmt.Println("=== Aepbase vs SQLite vs OpenClaw Benchmark Results ===")
 	fmt.Println()
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
@@ -600,18 +709,28 @@ func printTable(results []Result) {
 	for _, count := range recordSizes {
 		aKey := fmt.Sprintf("%d-aepbase", count)
 		oKey := fmt.Sprintf("%d-openclaw", count)
+		sKey := fmt.Sprintf("%d-sqlite", count)
 		a, aOk := summaries[aKey]
 		o, oOk := summaries[oKey]
+		s, sOk := summaries[sKey]
 		if !aOk || !oOk {
 			continue
 		}
-		savings := ""
+		aepSavings := ""
 		if o.totalInput > 0 {
 			pct := 100.0 * float64(o.totalInput-a.totalInput) / float64(o.totalInput)
-			savings = fmt.Sprintf("%.0f%% fewer tokens", pct)
+			aepSavings = fmt.Sprintf("%.0f%% fewer tokens", pct)
 		}
-		fmt.Fprintf(w2, "%d\t%s\t%d\t%d/%d\t\n", count, "aepbase", a.totalInput, a.correct, a.total)
-		fmt.Fprintf(w2, "%d\t%s\t%d\t%d/%d\t%s\n", count, "openclaw", o.totalInput, o.correct, o.total, savings)
+		fmt.Fprintf(w2, "%d\t%s\t%d\t%d/%d\t%s\n", count, "aepbase", a.totalInput, a.correct, a.total, aepSavings)
+		if sOk {
+			sqlSavings := ""
+			if o.totalInput > 0 {
+				pct := 100.0 * float64(o.totalInput-s.totalInput) / float64(o.totalInput)
+				sqlSavings = fmt.Sprintf("%.0f%% fewer tokens", pct)
+			}
+			fmt.Fprintf(w2, "%d\t%s\t%d\t%d/%d\t%s\n", count, "sqlite", s.totalInput, s.correct, s.total, sqlSavings)
+		}
+		fmt.Fprintf(w2, "%d\t%s\t%d\t%d/%d\t\n", count, "openclaw", o.totalInput, o.correct, o.total)
 	}
 	w2.Flush()
 }
