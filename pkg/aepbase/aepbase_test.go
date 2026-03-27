@@ -1906,6 +1906,273 @@ func TestExportUserResourcesOpenAPI(t *testing.T) {
 	}
 }
 
+// --- Singleton Resource Tests ---
+
+func createSingletonResource(t *testing.T, h http.Handler, id, singular, plural string, parents []string, props map[string]any) map[string]any {
+	t.Helper()
+	schema := map[string]any{"properties": props}
+	body := map[string]any{
+		"singular":  singular,
+		"plural":    plural,
+		"schema":    schema,
+		"singleton": true,
+	}
+	if len(parents) > 0 {
+		body["parents"] = parents
+	}
+	b, _ := json.Marshal(body)
+	path := "/aep-resource-definitions"
+	if id != "" {
+		path += "?id=" + id
+	}
+	resp := doRequest(t, h, "POST", path, string(b))
+	if resp.StatusCode != 200 {
+		m := readJSON(t, resp)
+		t.Fatalf("createSingletonResource %s: status %d: %v", singular, resp.StatusCode, m)
+	}
+	return readJSON(t, resp)
+}
+
+func TestCreateSingletonRequiresParent(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+
+	// Singleton without parents should fail.
+	body := `{"singular":"config","plural":"configs","schema":{"properties":{"theme":{"type":"string"}}},"singleton":true}`
+	resp := doRequest(t, h, "POST", "/aep-resource-definitions", body)
+	if resp.StatusCode != 400 {
+		t.Errorf("expected 400 for singleton without parent, got %d", resp.StatusCode)
+	}
+}
+
+func TestSingletonGetImplicitCreation(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+
+	// Create parent resource.
+	createResource(t, h, "user", "user", "users", nil, map[string]any{
+		"name": map[string]any{"type": "string"},
+	})
+	doRequest(t, h, "POST", "/users?id=alice", `{"name":"Alice"}`)
+
+	// Create singleton resource definition.
+	createSingletonResource(t, h, "config", "config", "configs", []string{"user"}, map[string]any{
+		"theme": map[string]any{"type": "string"},
+		"lang":  map[string]any{"type": "string"},
+	})
+
+	// GET the singleton before any explicit creation — should implicitly create it.
+	resp := doRequest(t, h, "GET", "/users/alice/config", "")
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	m := readJSON(t, resp)
+
+	// Should have path but no id.
+	if m["path"] != "users/alice/config" {
+		t.Errorf("expected path=users/alice/config, got %v", m["path"])
+	}
+	if _, hasID := m["id"]; hasID {
+		t.Error("singleton should not have an id field")
+	}
+	if m["create_time"] == nil || m["update_time"] == nil {
+		t.Error("expected timestamps")
+	}
+}
+
+func TestSingletonUpdate(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+
+	// Create parent and singleton.
+	createResource(t, h, "user", "user", "users", nil, map[string]any{
+		"name": map[string]any{"type": "string"},
+	})
+	doRequest(t, h, "POST", "/users?id=alice", `{"name":"Alice"}`)
+	createSingletonResource(t, h, "config", "config", "configs", []string{"user"}, map[string]any{
+		"theme": map[string]any{"type": "string"},
+		"lang":  map[string]any{"type": "string"},
+	})
+
+	// PATCH the singleton (implicitly creates it with the patch values).
+	resp := doRequest(t, h, "PATCH", "/users/alice/config", `{"theme":"dark","lang":"en"}`)
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	m := readJSON(t, resp)
+	if m["theme"] != "dark" {
+		t.Errorf("expected theme=dark, got %v", m["theme"])
+	}
+	if m["lang"] != "en" {
+		t.Errorf("expected lang=en, got %v", m["lang"])
+	}
+
+	// GET should return the updated values.
+	resp = doRequest(t, h, "GET", "/users/alice/config", "")
+	m = readJSON(t, resp)
+	if m["theme"] != "dark" {
+		t.Errorf("expected theme=dark after update, got %v", m["theme"])
+	}
+
+	// PATCH again (partial update on existing).
+	resp = doRequest(t, h, "PATCH", "/users/alice/config", `{"lang":"fr"}`)
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	m = readJSON(t, resp)
+	if m["theme"] != "dark" {
+		t.Errorf("expected theme=dark (unchanged), got %v", m["theme"])
+	}
+	if m["lang"] != "fr" {
+		t.Errorf("expected lang=fr, got %v", m["lang"])
+	}
+}
+
+func TestSingletonPerParent(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+
+	// Create parent and singleton.
+	createResource(t, h, "user", "user", "users", nil, map[string]any{
+		"name": map[string]any{"type": "string"},
+	})
+	doRequest(t, h, "POST", "/users?id=alice", `{"name":"Alice"}`)
+	doRequest(t, h, "POST", "/users?id=bob", `{"name":"Bob"}`)
+	createSingletonResource(t, h, "config", "config", "configs", []string{"user"}, map[string]any{
+		"theme": map[string]any{"type": "string"},
+	})
+
+	// Set different themes for each user.
+	doRequest(t, h, "PATCH", "/users/alice/config", `{"theme":"dark"}`)
+	doRequest(t, h, "PATCH", "/users/bob/config", `{"theme":"light"}`)
+
+	// Each user should have their own singleton instance.
+	resp := doRequest(t, h, "GET", "/users/alice/config", "")
+	m := readJSON(t, resp)
+	if m["theme"] != "dark" {
+		t.Errorf("expected alice's theme=dark, got %v", m["theme"])
+	}
+
+	resp = doRequest(t, h, "GET", "/users/bob/config", "")
+	m = readJSON(t, resp)
+	if m["theme"] != "light" {
+		t.Errorf("expected bob's theme=light, got %v", m["theme"])
+	}
+}
+
+func TestSingletonNoCreateDeleteEndpoints(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+
+	createResource(t, h, "user", "user", "users", nil, map[string]any{
+		"name": map[string]any{"type": "string"},
+	})
+	doRequest(t, h, "POST", "/users?id=alice", `{"name":"Alice"}`)
+	createSingletonResource(t, h, "config", "config", "configs", []string{"user"}, map[string]any{
+		"theme": map[string]any{"type": "string"},
+	})
+
+	// POST (Create) should not be available for singletons.
+	resp := doRequest(t, h, "POST", "/users/alice/configs", `{"theme":"dark"}`)
+	if resp.StatusCode < 400 {
+		t.Errorf("expected error status for POST to singleton collection, got %d", resp.StatusCode)
+	}
+
+	// DELETE should not be available for singletons.
+	resp = doRequest(t, h, "DELETE", "/users/alice/config", "")
+	if resp.StatusCode < 400 {
+		t.Errorf("expected error status for DELETE on singleton, got %d", resp.StatusCode)
+	}
+}
+
+func TestSingletonOpenAPI(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+
+	createResource(t, h, "user", "user", "users", nil, map[string]any{
+		"name": map[string]any{"type": "string"},
+	})
+	createSingletonResource(t, h, "config", "config", "configs", []string{"user"}, map[string]any{
+		"theme": map[string]any{"type": "string"},
+	})
+
+	resp := doRequest(t, h, "GET", "/openapi.json", "")
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	m := readJSON(t, resp)
+
+	paths, _ := m["paths"].(map[string]any)
+
+	// Should have the singleton path.
+	singletonPath, ok := paths["/users/{user_id}/config"]
+	if !ok {
+		t.Fatalf("expected singleton path /users/{user_id}/config in OpenAPI spec, paths: %v", keysOf(paths))
+	}
+	singletonOps := singletonPath.(map[string]any)
+	if _, ok := singletonOps["get"]; !ok {
+		t.Error("expected GET operation on singleton path")
+	}
+	if _, ok := singletonOps["patch"]; !ok {
+		t.Error("expected PATCH operation on singleton path")
+	}
+
+	// Should NOT have collection paths for the singleton.
+	if _, ok := paths["/users/{user_id}/configs"]; ok {
+		t.Error("singleton should not have a collection path")
+	}
+	if _, ok := paths["/users/{user_id}/configs/{config_id}"]; ok {
+		t.Error("singleton should not have a resource path with ID")
+	}
+
+	// Check x-aep-resource has singleton: true.
+	components, _ := m["components"].(map[string]any)
+	schemas, _ := components["schemas"].(map[string]any)
+	configSchema, _ := schemas["config"].(map[string]any)
+	if configSchema == nil {
+		// Try capitalized name.
+		configSchema, _ = schemas["Config"].(map[string]any)
+	}
+	if configSchema != nil {
+		xaep, _ := configSchema["x-aep-resource"].(map[string]any)
+		if xaep != nil {
+			if singleton, ok := xaep["singleton"]; !ok || singleton != true {
+				t.Errorf("expected x-aep-resource.singleton=true, got %v", xaep)
+			}
+		}
+	}
+}
+
+func TestSingletonDefinitionPersistence(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+
+	createResource(t, h, "user", "user", "users", nil, map[string]any{
+		"name": map[string]any{"type": "string"},
+	})
+	createSingletonResource(t, h, "config", "config", "configs", []string{"user"}, map[string]any{
+		"theme": map[string]any{"type": "string"},
+	})
+
+	// GET the definition — should have singleton=true.
+	resp := doRequest(t, h, "GET", "/aep-resource-definitions/config", "")
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	m := readJSON(t, resp)
+	if m["singleton"] != true {
+		t.Errorf("expected singleton=true in definition, got %v", m["singleton"])
+	}
+}
+
+func keysOf(m map[string]any) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
 // Ensure unused imports are consumed.
 var _ = (*sql.DB)(nil)
 var _ = meta.ResourceDefinition{}

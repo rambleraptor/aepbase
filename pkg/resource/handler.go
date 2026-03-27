@@ -40,6 +40,14 @@ func RegisterRoutes(mux *http.ServeMux, d *sql.DB, r *api.Resource, customMethod
 	mux.HandleFunc("DELETE "+resourcePath, makeDeleteHandler(d, r, idParam))
 }
 
+// RegisterSingletonRoutes registers GET and PATCH routes for a singleton resource.
+// Singleton resources have a fixed path like /parents/{parent_id}/singular
+// with no collection endpoints and no resource ID in the path.
+func RegisterSingletonRoutes(mux *http.ServeMux, d *sql.DB, r *api.Resource, singletonPath string) {
+	mux.HandleFunc("GET "+singletonPath, makeSingletonGetHandler(d, r))
+	mux.HandleFunc("PATCH "+singletonPath, makeSingletonUpdateHandler(d, r))
+}
+
 // makeGetOrCustomHandler returns a handler that serves GET for both regular
 // resources and GET-based custom methods. Go 1.22's {wildcard} matches
 // "id:method" as a single value, so we check for a colon to dispatch.
@@ -400,6 +408,186 @@ func makeDeleteHandler(d *sql.DB, r *api.Resource, idParam string) http.HandlerF
 
 		w.WriteHeader(http.StatusNoContent)
 	}
+}
+
+// makeSingletonGetHandler returns a handler for GET on a singleton resource.
+// If the singleton doesn't exist yet, it is implicitly created with default values.
+func makeSingletonGetHandler(d *sql.DB, r *api.Resource) http.HandlerFunc {
+	return func(w http.ResponseWriter, req *http.Request) {
+		parentIDs := extractSingletonParentIDs(req, r)
+		path := buildSingletonPath(r, parentIDs)
+
+		stored, err := Get(d, r.Plural, path, r.Schema)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("database error: %v", err))
+			return
+		}
+		if stored == nil {
+			// Implicit creation: singleton always exists.
+			now := time.Now().UTC().Format(time.RFC3339)
+			stored = &StoredResource{
+				ID:         singletonID(parentIDs, r),
+				Path:       path,
+				CreateTime: now,
+				UpdateTime: now,
+				Fields:     make(map[string]any),
+			}
+			directParentIDs := extractDirectParentIDs(parentIDs, r)
+			if err := Insert(d, r.Plural, stored, directParentIDs, r.Schema); err != nil {
+				writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to create singleton: %v", err))
+				return
+			}
+		}
+
+		writeSingletonJSON(w, http.StatusOK, stored, r.Schema)
+	}
+}
+
+// makeSingletonUpdateHandler returns a handler for PATCH on a singleton resource.
+// If the singleton doesn't exist yet, it is implicitly created with the patch values.
+func makeSingletonUpdateHandler(d *sql.DB, r *api.Resource) http.HandlerFunc {
+	return func(w http.ResponseWriter, req *http.Request) {
+		parentIDs := extractSingletonParentIDs(req, r)
+		path := buildSingletonPath(r, parentIDs)
+
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+
+		var patch map[string]any
+		if err := json.Unmarshal(body, &patch); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid JSON")
+			return
+		}
+
+		// Remove standard fields from patch.
+		delete(patch, "id")
+		delete(patch, "path")
+		delete(patch, "create_time")
+		delete(patch, "update_time")
+
+		// Strip read-only fields.
+		stripReadOnlyFields(r.Schema, patch)
+
+		// Validate field types on the patch values.
+		if err := validateTypes(r.Schema, patch); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
+		existing, err := Get(d, r.Plural, path, r.Schema)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("database error: %v", err))
+			return
+		}
+
+		now := time.Now().UTC().Format(time.RFC3339)
+
+		if existing == nil {
+			// Implicit creation with patch values.
+			existing = &StoredResource{
+				ID:         singletonID(parentIDs, r),
+				Path:       path,
+				CreateTime: now,
+				UpdateTime: now,
+				Fields:     patch,
+			}
+			directParentIDs := extractDirectParentIDs(parentIDs, r)
+			if err := Insert(d, r.Plural, existing, directParentIDs, r.Schema); err != nil {
+				writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to create singleton: %v", err))
+				return
+			}
+		} else {
+			// Merge patch onto existing fields.
+			for k, v := range patch {
+				existing.Fields[k] = v
+			}
+			existing.UpdateTime = now
+
+			if err := Update(d, r.Plural, path, existing.Fields, now, r.Schema); err != nil {
+				writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to update singleton: %v", err))
+				return
+			}
+		}
+
+		writeSingletonJSON(w, http.StatusOK, existing, r.Schema)
+	}
+}
+
+// extractSingletonParentIDs extracts parent IDs for a singleton resource.
+// For singletons, the parent resource's PatternElems define the URL params.
+func extractSingletonParentIDs(req *http.Request, r *api.Resource) map[string]string {
+	parentIDs := make(map[string]string)
+	// Walk through all ancestor resources to collect their ID params.
+	for _, parentSingular := range r.Parents {
+		parentRes := r.API.Resources[parentSingular]
+		if parentRes == nil {
+			continue
+		}
+		parentElems := parentRes.PatternElems()
+		// Collect all ID params from parent pattern (includes grandparent IDs).
+		for i := 1; i < len(parentElems); i += 2 {
+			paramName := strings.Trim(parentElems[i], "{}")
+			parentIDs[paramName] = req.PathValue(paramName)
+		}
+	}
+	return parentIDs
+}
+
+// buildSingletonPath constructs the path for a singleton resource.
+// E.g., "users/123/config" for a config singleton under a user.
+func buildSingletonPath(r *api.Resource, parentIDs map[string]string) string {
+	var parts []string
+	// Get the direct parent's pattern elements to build the parent path.
+	if len(r.Parents) > 0 {
+		parentRes := r.API.Resources[r.Parents[0]]
+		if parentRes != nil {
+			parentElems := parentRes.PatternElems()
+			for i := 0; i < len(parentElems); i += 2 {
+				collection := parentElems[i]
+				paramName := strings.Trim(parentElems[i+1], "{}")
+				parts = append(parts, collection, parentIDs[paramName])
+			}
+		}
+	}
+	parts = append(parts, r.Singular)
+	return strings.Join(parts, "/")
+}
+
+// singletonID generates a unique ID for a singleton instance.
+// Uses the direct parent's ID since there's exactly one singleton per parent.
+func singletonID(parentIDs map[string]string, r *api.Resource) string {
+	if len(r.Parents) > 0 {
+		paramName := r.Parents[0] + "_id"
+		if id, ok := parentIDs[paramName]; ok {
+			return id
+		}
+	}
+	return r.Singular
+}
+
+// singletonToMap converts a StoredResource to a map for singleton JSON output.
+// Singletons don't include an "id" field per the AEP spec.
+func singletonToMap(s *StoredResource, schema *openapi.Schema) map[string]any {
+	m := map[string]any{
+		"path":        s.Path,
+		"create_time": s.CreateTime,
+		"update_time": s.UpdateTime,
+	}
+	for propName := range schema.Properties {
+		if v, ok := s.Fields[propName]; ok {
+			m[propName] = v
+		}
+	}
+	return m
+}
+
+func writeSingletonJSON(w http.ResponseWriter, status int, s *StoredResource, schema *openapi.Schema) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(singletonToMap(s, schema))
 }
 
 // extractParentIDs pulls ALL ancestor IDs from the URL path values.

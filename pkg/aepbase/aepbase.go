@@ -56,6 +56,7 @@ type State struct {
 	pendingCustomMethods  []customMethodRegistration
 	resourceDescriptions  map[string]string         // singular -> description
 	resourceExamples      map[string]map[string]any  // singular -> field -> example value
+	singletonResources    map[string]bool            // singular -> true for singleton resources
 }
 
 // metaResourceSingular is the singular name for the built-in meta resource.
@@ -79,6 +80,7 @@ func NewState(d *sql.DB, serverURL string) *State {
 				URL:  "https://github.com/rambleraptor/aepbase",
 			},
 		},
+		singletonResources: make(map[string]bool),
 		resourceDescriptions: map[string]string{
 			"aep-resource-definition": "A resource definition. Create these to dynamically add new API endpoints.",
 		},
@@ -176,7 +178,10 @@ func (s *State) AddResource(def meta.ResourceDefinition) error {
 	for k, v := range def.Schema.Properties {
 		schema.Properties[k] = v
 	}
-	schema.Properties["id"] = openapi.Schema{Type: "string", ReadOnly: true}
+	// Singletons don't have user-provided or system-generated IDs.
+	if !def.Singleton {
+		schema.Properties["id"] = openapi.Schema{Type: "string", ReadOnly: true}
+	}
 	schema.Properties["path"] = openapi.Schema{Type: "string", ReadOnly: true}
 	schema.Properties["create_time"] = openapi.Schema{Type: "string", Format: "date-time", ReadOnly: true}
 	schema.Properties["update_time"] = openapi.Schema{Type: "string", Format: "date-time", ReadOnly: true}
@@ -188,20 +193,31 @@ func (s *State) AddResource(def meta.ResourceDefinition) error {
 		}
 	}
 
-	r := &api.Resource{
-		Singular: def.Singular,
-		Plural:   def.Plural,
-		Parents:  def.Parents,
-		Children: []*api.Resource{},
-		Schema:   &schema,
-		Methods: api.Methods{
+	var methods api.Methods
+	if def.Singleton {
+		// Singletons only support Get and Update.
+		methods = api.Methods{
+			Get:    &api.GetMethod{},
+			Update: &api.UpdateMethod{},
+		}
+	} else {
+		methods = api.Methods{
 			Get:    &api.GetMethod{},
 			List:   &api.ListMethod{SupportsFilter: true, SupportsSkip: true},
 			Create: &api.CreateMethod{SupportsUserSettableCreate: true},
 			Update: &api.UpdateMethod{},
 			Delete: &api.DeleteMethod{},
 			Apply:  &api.ApplyMethod{},
-		},
+		}
+	}
+
+	r := &api.Resource{
+		Singular: def.Singular,
+		Plural:   def.Plural,
+		Parents:  def.Parents,
+		Children: []*api.Resource{},
+		Schema:   &schema,
+		Methods:  methods,
 	}
 	r.API = s.API
 
@@ -223,6 +239,9 @@ func (s *State) AddResource(def meta.ResourceDefinition) error {
 	}
 
 	s.API.Resources[def.Singular] = r
+	if def.Singleton {
+		s.singletonResources[def.Singular] = true
+	}
 	if def.Description != "" {
 		s.resourceDescriptions[def.Singular] = def.Description
 	}
@@ -282,6 +301,7 @@ func (s *State) RemoveResource(singular string) error {
 	}
 
 	delete(s.API.Resources, singular)
+	delete(s.singletonResources, singular)
 	delete(s.resourceDescriptions, singular)
 	delete(s.resourceExamples, singular)
 	s.rebuildMux()
@@ -353,7 +373,9 @@ func (s *State) UpdateResourceSchema(def meta.ResourceDefinition, oldDef meta.Re
 	for k, v := range def.Schema.Properties {
 		schema.Properties[k] = v
 	}
-	schema.Properties["id"] = openapi.Schema{Type: "string", ReadOnly: true}
+	if !s.singletonResources[def.Singular] {
+		schema.Properties["id"] = openapi.Schema{Type: "string", ReadOnly: true}
+	}
 	schema.Properties["path"] = openapi.Schema{Type: "string", ReadOnly: true}
 	schema.Properties["create_time"] = openapi.Schema{Type: "string", Format: "date-time", ReadOnly: true}
 	schema.Properties["update_time"] = openapi.Schema{Type: "string", Format: "date-time", ReadOnly: true}
@@ -373,6 +395,12 @@ func (s *State) rebuildMux() {
 		if r.Singular == metaResourceSingular || r.Singular == operationResourceSingular {
 			continue
 		}
+		if s.singletonResources[r.Singular] {
+			// Singleton resources use different route patterns.
+			singletonPath := s.buildSingletonRoutePath(r)
+			resource.RegisterSingletonRoutes(mux, s.DB, r, singletonPath)
+			continue
+		}
 		// Collect custom method handlers for this resource.
 		cmHandlers := make(map[string]resource.CustomMethodHandler)
 		for _, reg := range s.customMethods {
@@ -388,6 +416,21 @@ func (s *State) rebuildMux() {
 	s.mux = mux
 }
 
+// buildSingletonRoutePath constructs the HTTP route pattern for a singleton resource.
+// E.g., "/users/{user_id}/config" for a config singleton under users.
+func (s *State) buildSingletonRoutePath(r *api.Resource) string {
+	var parts []string
+	if len(r.Parents) > 0 {
+		parentRes := s.API.Resources[r.Parents[0]]
+		if parentRes != nil {
+			parentElems := parentRes.PatternElems()
+			parts = append(parts, parentElems...)
+		}
+	}
+	parts = append(parts, r.Singular)
+	return "/" + strings.Join(parts, "/")
+}
+
 func (s *State) serveOpenAPI(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	a := s.API
@@ -399,6 +442,10 @@ func (s *State) serveOpenAPI(w http.ResponseWriter, r *http.Request) {
 	for k, v := range s.resourceExamples {
 		examples[k] = v
 	}
+	singletons := make(map[string]bool, len(s.singletonResources))
+	for k, v := range s.singletonResources {
+		singletons[k] = v
+	}
 	s.mu.RUnlock()
 
 	jsonBytes, err := a.ConvertToOpenAPIBytes()
@@ -408,6 +455,12 @@ func (s *State) serveOpenAPI(w http.ResponseWriter, r *http.Request) {
 	}
 
 	jsonBytes, err = enrichOpenAPI(jsonBytes, a.Name, descriptions, examples)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	jsonBytes, err = fixSingletonOpenAPI(jsonBytes, a, singletons)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -458,11 +511,20 @@ func (s *State) ExportUserResourcesOpenAPI() ([]byte, error) {
 	}
 	s.mu.RUnlock()
 
+	singletons := make(map[string]bool, len(s.singletonResources))
+	for k, v := range s.singletonResources {
+		singletons[k] = v
+	}
+
 	jsonBytes, err := filtered.ConvertToOpenAPIBytes()
 	if err != nil {
 		return nil, err
 	}
-	return enrichOpenAPI(jsonBytes, filtered.Name, descriptions, examples)
+	jsonBytes, err = enrichOpenAPI(jsonBytes, filtered.Name, descriptions, examples)
+	if err != nil {
+		return nil, err
+	}
+	return fixSingletonOpenAPI(jsonBytes, filtered, singletons)
 }
 
 // errorResponseSchema returns a reusable error response schema.
@@ -1112,4 +1174,135 @@ func extractPathValueNames(r *http.Request) []string {
 		pattern = pattern[start+end+1:]
 	}
 	return names
+}
+
+// fixSingletonOpenAPI transforms the OpenAPI spec generated by aep-lib-go to
+// use correct singleton paths. aep-lib-go generates collection-style paths
+// (e.g., /users/{user_id}/configs/{config_id}) which need to be replaced with
+// singleton paths (e.g., /users/{user_id}/config).
+func fixSingletonOpenAPI(data []byte, a *api.API, singletons map[string]bool) ([]byte, error) {
+	if len(singletons) == 0 {
+		return data, nil
+	}
+
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return nil, err
+	}
+
+	paths, _ := doc["paths"].(map[string]any)
+	if paths == nil {
+		return data, nil
+	}
+	components, _ := doc["components"].(map[string]any)
+	schemas, _ := components["schemas"].(map[string]any)
+
+	for singular := range singletons {
+		r, ok := a.Resources[singular]
+		if !ok {
+			continue
+		}
+
+		// Add singleton: true to x-aep-resource annotation.
+		if schemas != nil {
+			// aep-lib-go may use the singular name as-is or capitalized as the schema key.
+			schemaName := singular
+			if _, ok := schemas[schemaName]; !ok {
+				schemaName = capitalize(singular)
+			}
+			if schema, ok := schemas[schemaName].(map[string]any); ok {
+				if xaep, ok := schema["x-aep-resource"].(map[string]any); ok {
+					xaep["singleton"] = true
+				}
+				// Remove "id" from required and properties since singletons have no ID.
+				if props, ok := schema["properties"].(map[string]any); ok {
+					delete(props, "id")
+				}
+				if required, ok := schema["required"].([]any); ok {
+					var filtered []any
+					for _, r := range required {
+						if r != "id" {
+							filtered = append(filtered, r)
+						}
+					}
+					schema["required"] = filtered
+				}
+			}
+		}
+
+		// Build the old paths that aep-lib-go generated (collection + resource).
+		elems := r.PatternElems()
+		oldCollectionPath := "/" + strings.Join(elems[:len(elems)-1], "/")
+		oldResourcePath := "/" + strings.Join(elems, "/")
+
+		// Build the correct singleton path.
+		var singletonPathParts []string
+		if len(r.Parents) > 0 {
+			parentRes := a.Resources[r.Parents[0]]
+			if parentRes != nil {
+				singletonPathParts = append(singletonPathParts, parentRes.PatternElems()...)
+			}
+		}
+		singletonPathParts = append(singletonPathParts, r.Singular)
+		singletonPath := "/" + strings.Join(singletonPathParts, "/")
+
+		// Extract GET and PATCH operations from the old paths and move them to the singleton path.
+		singletonOps := make(map[string]any)
+
+		if resourceOps, ok := paths[oldResourcePath].(map[string]any); ok {
+			if getOp, ok := resourceOps["get"]; ok {
+				op := getOp.(map[string]any)
+				// Fix operation: remove the resource ID parameter.
+				fixSingletonOperation(op, r)
+				singletonOps["get"] = op
+			}
+			if patchOp, ok := resourceOps["patch"]; ok {
+				op := patchOp.(map[string]any)
+				fixSingletonOperation(op, r)
+				singletonOps["patch"] = op
+			}
+		}
+
+		// Remove the old paths.
+		delete(paths, oldCollectionPath)
+		delete(paths, oldResourcePath)
+
+		// Add the new singleton path.
+		if len(singletonOps) > 0 {
+			paths[singletonPath] = singletonOps
+		}
+	}
+
+	return json.MarshalIndent(doc, "", "  ")
+}
+
+// fixSingletonOperation removes the resource ID parameter from an operation
+// since singletons don't have their own ID in the path.
+func fixSingletonOperation(op map[string]any, r *api.Resource) {
+	params, ok := op["parameters"].([]any)
+	if !ok {
+		return
+	}
+	idParamName := strings.ReplaceAll(r.Singular, "-", "_") + "_id"
+	var filtered []any
+	for _, p := range params {
+		param, ok := p.(map[string]any)
+		if !ok {
+			filtered = append(filtered, p)
+			continue
+		}
+		if name, ok := param["name"].(string); ok && name == idParamName {
+			continue
+		}
+		filtered = append(filtered, p)
+	}
+	op["parameters"] = filtered
+}
+
+// capitalize returns s with the first letter uppercased.
+func capitalize(s string) string {
+	if s == "" {
+		return s
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
 }

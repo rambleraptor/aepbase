@@ -52,6 +52,10 @@ func makeCreateHandler(state StateManager) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "plural must not start with underscore")
 			return
 		}
+		if def.Singleton && len(def.Parents) == 0 {
+			writeError(w, http.StatusBadRequest, "singleton resources must have at least one parent")
+			return
+		}
 
 		// User-settable ID or generate one.
 		id := r.URL.Query().Get("id")
@@ -282,27 +286,32 @@ func insertDefinition(db *sql.DB, def *ResourceDefinition) error {
 	schemaJSON, _ := json.Marshal(def.Schema)
 	parentsJSON, _ := json.Marshal(def.Parents)
 	examplesJSON, _ := json.Marshal(def.Examples)
+	singletonInt := 0
+	if def.Singleton {
+		singletonInt = 1
+	}
 	_, err := db.Exec(
-		"INSERT INTO _aep_resource_definitions (id, singular, plural, description, examples_json, schema_json, parents_json, create_time, update_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-		def.ID, def.Singular, def.Plural, def.Description, string(examplesJSON), string(schemaJSON), string(parentsJSON), def.CreateTime, def.UpdateTime,
+		"INSERT INTO _aep_resource_definitions (id, singular, plural, description, examples_json, schema_json, parents_json, singleton, create_time, update_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		def.ID, def.Singular, def.Plural, def.Description, string(examplesJSON), string(schemaJSON), string(parentsJSON), singletonInt, def.CreateTime, def.UpdateTime,
 	)
 	return err
 }
 
 func getDefinitionByID(db *sql.DB, id string) (*ResourceDefinition, error) {
-	row := db.QueryRow("SELECT id, singular, plural, description, examples_json, schema_json, parents_json, create_time, update_time FROM _aep_resource_definitions WHERE id = ?", id)
+	row := db.QueryRow("SELECT id, singular, plural, description, examples_json, schema_json, parents_json, singleton, create_time, update_time FROM _aep_resource_definitions WHERE id = ?", id)
 	return scanDefinition(row)
 }
 
 func getDefinition(db *sql.DB, singular string) (*ResourceDefinition, error) {
-	row := db.QueryRow("SELECT id, singular, plural, description, examples_json, schema_json, parents_json, create_time, update_time FROM _aep_resource_definitions WHERE singular = ?", singular)
+	row := db.QueryRow("SELECT id, singular, plural, description, examples_json, schema_json, parents_json, singleton, create_time, update_time FROM _aep_resource_definitions WHERE singular = ?", singular)
 	return scanDefinition(row)
 }
 
 func scanDefinition(row *sql.Row) (*ResourceDefinition, error) {
 	var def ResourceDefinition
 	var schemaJSON, parentsJSON, examplesJSON string
-	err := row.Scan(&def.ID, &def.Singular, &def.Plural, &def.Description, &examplesJSON, &schemaJSON, &parentsJSON, &def.CreateTime, &def.UpdateTime)
+	var singletonInt int
+	err := row.Scan(&def.ID, &def.Singular, &def.Plural, &def.Description, &examplesJSON, &schemaJSON, &parentsJSON, &singletonInt, &def.CreateTime, &def.UpdateTime)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -312,6 +321,7 @@ func scanDefinition(row *sql.Row) (*ResourceDefinition, error) {
 	json.Unmarshal([]byte(schemaJSON), &def.Schema)
 	json.Unmarshal([]byte(parentsJSON), &def.Parents)
 	json.Unmarshal([]byte(examplesJSON), &def.Examples)
+	def.Singleton = singletonInt != 0
 	def.Path = "aep-resource-definitions/" + def.ID
 	return &def, nil
 }
@@ -321,12 +331,12 @@ func listDefinitions(db *sql.DB, limit int, cursor string) ([]ResourceDefinition
 	var err error
 	if cursor != "" {
 		rows, err = db.Query(
-			"SELECT id, singular, plural, description, examples_json, schema_json, parents_json, create_time, update_time FROM _aep_resource_definitions WHERE id > ? ORDER BY id LIMIT ?",
+			"SELECT id, singular, plural, description, examples_json, schema_json, parents_json, singleton, create_time, update_time FROM _aep_resource_definitions WHERE id > ? ORDER BY id LIMIT ?",
 			cursor, limit,
 		)
 	} else {
 		rows, err = db.Query(
-			"SELECT id, singular, plural, description, examples_json, schema_json, parents_json, create_time, update_time FROM _aep_resource_definitions ORDER BY id LIMIT ?",
+			"SELECT id, singular, plural, description, examples_json, schema_json, parents_json, singleton, create_time, update_time FROM _aep_resource_definitions ORDER BY id LIMIT ?",
 			limit,
 		)
 	}
@@ -339,12 +349,14 @@ func listDefinitions(db *sql.DB, limit int, cursor string) ([]ResourceDefinition
 	for rows.Next() {
 		var def ResourceDefinition
 		var schemaJSON, parentsJSON, examplesJSON string
-		if err := rows.Scan(&def.ID, &def.Singular, &def.Plural, &def.Description, &examplesJSON, &schemaJSON, &parentsJSON, &def.CreateTime, &def.UpdateTime); err != nil {
+		var singletonInt int
+		if err := rows.Scan(&def.ID, &def.Singular, &def.Plural, &def.Description, &examplesJSON, &schemaJSON, &parentsJSON, &singletonInt, &def.CreateTime, &def.UpdateTime); err != nil {
 			return nil, err
 		}
 		json.Unmarshal([]byte(schemaJSON), &def.Schema)
 		json.Unmarshal([]byte(parentsJSON), &def.Parents)
 		json.Unmarshal([]byte(examplesJSON), &def.Examples)
+		def.Singleton = singletonInt != 0
 		def.Path = "aep-resource-definitions/" + def.ID
 		defs = append(defs, def)
 	}
