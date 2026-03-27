@@ -50,6 +50,7 @@ func createMetaTables(db *sql.DB) error {
 	// These are no-ops for new databases since the columns are in the CREATE TABLE.
 	db.Exec(`ALTER TABLE _aep_resource_definitions ADD COLUMN description TEXT NOT NULL DEFAULT ''`)
 	db.Exec(`ALTER TABLE _aep_resource_definitions ADD COLUMN examples_json TEXT NOT NULL DEFAULT '{}'`)
+	db.Exec(`ALTER TABLE _aep_resource_definitions ADD COLUMN singleton INTEGER NOT NULL DEFAULT 0`)
 
 	// Operations table for long-running operations.
 	_, err = db.Exec(`

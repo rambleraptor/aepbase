@@ -13,6 +13,7 @@ type ResourceDefinition struct {
 	Examples    map[string]any    `json:"examples,omitempty"`
 	Schema      openapi.Schema    `json:"schema"`
 	Parents     []string          `json:"parents,omitempty"`
+	Singleton   bool              `json:"singleton,omitempty"`
 	CreateTime  string            `json:"create_time,omitempty"`
 	UpdateTime  string            `json:"update_time,omitempty"`
 }
