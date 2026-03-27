@@ -2176,3 +2176,289 @@ func keysOf(m map[string]any) []string {
 // Ensure unused imports are consumed.
 var _ = (*sql.DB)(nil)
 var _ = meta.ResourceDefinition{}
+
+// --- File Upload Tests ---
+
+func TestFileFieldUploadMultipart(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+
+	// Create a resource with a file field.
+	createResource(t, h, "document", "document", "documents", nil, map[string]any{
+		"title":      map[string]any{"type": "string"},
+		"attachment": map[string]any{"type": "string", "format": "file"},
+	})
+
+	// Upload a document with a file via multipart/form-data.
+	body, contentType := buildMultipartBody(t, map[string]string{
+		"title": "My Document",
+	}, map[string]fileUpload{
+		"attachment": {filename: "report.pdf", contentType: "application/pdf", content: []byte("PDF content here")},
+	})
+
+	req := httptest.NewRequest("POST", "/documents?id=doc1", body)
+	req.Header.Set("Content-Type", contentType)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	resp := w.Result()
+
+	if resp.StatusCode != 200 {
+		m := readJSON(t, resp)
+		t.Fatalf("expected 200, got %d: %v", resp.StatusCode, m)
+	}
+
+	m := readJSON(t, resp)
+	if m["id"] != "doc1" {
+		t.Errorf("expected id=doc1, got %v", m["id"])
+	}
+	if m["title"] != "My Document" {
+		t.Errorf("expected title='My Document', got %v", m["title"])
+	}
+	// The attachment field should be expanded to a metadata object.
+	att, ok := m["attachment"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected attachment to be a metadata object, got %T: %v", m["attachment"], m["attachment"])
+	}
+	if att["filename"] != "report.pdf" {
+		t.Errorf("expected filename=report.pdf, got %v", att["filename"])
+	}
+	if att["content_type"] != "application/pdf" {
+		t.Errorf("expected content_type=application/pdf, got %v", att["content_type"])
+	}
+	if att["size"] != float64(16) {
+		t.Errorf("expected size=16, got %v", att["size"])
+	}
+	fileID, ok := att["id"].(string)
+	if !ok || fileID == "" {
+		t.Fatalf("expected file id to be set, got %v", att["id"])
+	}
+
+	// Download the file via /files/{id}.
+	downloadResp := doRequest(t, h, "GET", "/files/"+fileID, "")
+	if downloadResp.StatusCode != 200 {
+		t.Fatalf("expected 200 for download, got %d", downloadResp.StatusCode)
+	}
+	defer downloadResp.Body.Close()
+	downloadedContent, _ := io.ReadAll(downloadResp.Body)
+	if string(downloadedContent) != "PDF content here" {
+		t.Errorf("expected downloaded content to match, got %q", string(downloadedContent))
+	}
+	if downloadResp.Header.Get("Content-Type") != "application/pdf" {
+		t.Errorf("expected content-type application/pdf, got %q", downloadResp.Header.Get("Content-Type"))
+	}
+}
+
+func TestFileFieldGetResource(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+
+	createResource(t, h, "document", "document", "documents", nil, map[string]any{
+		"title":      map[string]any{"type": "string"},
+		"attachment": map[string]any{"type": "string", "format": "file"},
+	})
+
+	// Upload a document with a file.
+	body, contentType := buildMultipartBody(t, map[string]string{
+		"title": "Test Doc",
+	}, map[string]fileUpload{
+		"attachment": {filename: "test.txt", contentType: "text/plain", content: []byte("hello world")},
+	})
+
+	req := httptest.NewRequest("POST", "/documents?id=d1", body)
+	req.Header.Set("Content-Type", contentType)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Result().StatusCode != 200 {
+		t.Fatalf("create failed: %d", w.Result().StatusCode)
+	}
+
+	// GET the document — file fields should be expanded.
+	getResp := doRequest(t, h, "GET", "/documents/d1", "")
+	if getResp.StatusCode != 200 {
+		t.Fatalf("get failed: %d", getResp.StatusCode)
+	}
+	m := readJSON(t, getResp)
+	att, ok := m["attachment"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected attachment to be object, got %T", m["attachment"])
+	}
+	if att["filename"] != "test.txt" {
+		t.Errorf("expected filename=test.txt, got %v", att["filename"])
+	}
+}
+
+func TestFileFieldListResource(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+
+	createResource(t, h, "document", "document", "documents", nil, map[string]any{
+		"title":      map[string]any{"type": "string"},
+		"attachment": map[string]any{"type": "string", "format": "file"},
+	})
+
+	// Upload a document.
+	body, contentType := buildMultipartBody(t, map[string]string{
+		"title": "Listed Doc",
+	}, map[string]fileUpload{
+		"attachment": {filename: "list.txt", contentType: "text/plain", content: []byte("list data")},
+	})
+
+	req := httptest.NewRequest("POST", "/documents?id=dl1", body)
+	req.Header.Set("Content-Type", contentType)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	// LIST — file fields should be expanded.
+	listResp := doRequest(t, h, "GET", "/documents", "")
+	if listResp.StatusCode != 200 {
+		t.Fatalf("list failed: %d", listResp.StatusCode)
+	}
+	lm := readJSON(t, listResp)
+	results, _ := lm["results"].([]any)
+	if len(results) == 0 {
+		t.Fatal("expected at least one result")
+	}
+	first := results[0].(map[string]any)
+	att, ok := first["attachment"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected attachment to be object in list, got %T", first["attachment"])
+	}
+	if att["filename"] != "list.txt" {
+		t.Errorf("expected filename=list.txt, got %v", att["filename"])
+	}
+}
+
+func TestFileFieldUpdateMultipart(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+
+	createResource(t, h, "document", "document", "documents", nil, map[string]any{
+		"title":      map[string]any{"type": "string"},
+		"attachment": map[string]any{"type": "string", "format": "file"},
+	})
+
+	// Create a document with a file.
+	body, contentType := buildMultipartBody(t, map[string]string{
+		"title": "Original",
+	}, map[string]fileUpload{
+		"attachment": {filename: "v1.txt", contentType: "text/plain", content: []byte("version 1")},
+	})
+	req := httptest.NewRequest("POST", "/documents?id=upd1", body)
+	req.Header.Set("Content-Type", contentType)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	// Update with a new file.
+	body2, contentType2 := buildMultipartBody(t, map[string]string{
+		"title": "Updated",
+	}, map[string]fileUpload{
+		"attachment": {filename: "v2.txt", contentType: "text/plain", content: []byte("version 2")},
+	})
+	req2 := httptest.NewRequest("PATCH", "/documents/upd1", body2)
+	req2.Header.Set("Content-Type", contentType2)
+	w2 := httptest.NewRecorder()
+	h.ServeHTTP(w2, req2)
+	if w2.Result().StatusCode != 200 {
+		m := readJSON(t, w2.Result())
+		t.Fatalf("update failed: %d: %v", w2.Result().StatusCode, m)
+	}
+
+	m := readJSON(t, w2.Result())
+	if m["title"] != "Updated" {
+		t.Errorf("expected title=Updated, got %v", m["title"])
+	}
+	att := m["attachment"].(map[string]any)
+	if att["filename"] != "v2.txt" {
+		t.Errorf("expected filename=v2.txt, got %v", att["filename"])
+	}
+
+	// Download new file to verify content.
+	downloadResp := doRequest(t, h, "GET", "/files/"+att["id"].(string), "")
+	defer downloadResp.Body.Close()
+	content, _ := io.ReadAll(downloadResp.Body)
+	if string(content) != "version 2" {
+		t.Errorf("expected 'version 2', got %q", string(content))
+	}
+}
+
+func TestFileFieldJSONCreate(t *testing.T) {
+	// Creating a resource with a file field using plain JSON should still work
+	// (the field value will be whatever string the user provides, but it won't
+	// have file content behind it).
+	state := newTestState(t)
+	h := state.Handler()
+
+	createResource(t, h, "document", "document", "documents", nil, map[string]any{
+		"title":      map[string]any{"type": "string"},
+		"attachment": map[string]any{"type": "string", "format": "file"},
+	})
+
+	resp := doRequest(t, h, "POST", "/documents?id=jsondoc", `{"title":"JSON Doc"}`)
+	if resp.StatusCode != 200 {
+		m := readJSON(t, resp)
+		t.Fatalf("expected 200, got %d: %v", resp.StatusCode, m)
+	}
+	m := readJSON(t, resp)
+	if m["title"] != "JSON Doc" {
+		t.Errorf("expected title='JSON Doc', got %v", m["title"])
+	}
+	// attachment should be nil/absent when not provided.
+	if m["attachment"] != nil {
+		t.Errorf("expected attachment to be nil, got %v", m["attachment"])
+	}
+}
+
+func TestFileDownloadNotFound(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+
+	resp := doRequest(t, h, "GET", "/files/nonexistent", "")
+	if resp.StatusCode != 404 {
+		t.Errorf("expected 404, got %d", resp.StatusCode)
+	}
+}
+
+// --- Multipart test helpers ---
+
+type fileUpload struct {
+	filename    string
+	contentType string
+	content     []byte
+}
+
+func buildMultipartBody(t *testing.T, jsonFields map[string]string, files map[string]fileUpload) (*strings.Reader, string) {
+	t.Helper()
+
+	// Build the JSON data from string fields.
+	dataMap := make(map[string]any)
+	for k, v := range jsonFields {
+		dataMap[k] = v
+	}
+	dataJSON, _ := json.Marshal(dataMap)
+
+	// Build multipart body manually.
+	boundary := "----TestBoundary12345"
+	var sb strings.Builder
+
+	// Write the data part.
+	sb.WriteString("--" + boundary + "\r\n")
+	sb.WriteString("Content-Disposition: form-data; name=\"data\"\r\n")
+	sb.WriteString("Content-Type: application/json\r\n")
+	sb.WriteString("\r\n")
+	sb.Write(dataJSON)
+	sb.WriteString("\r\n")
+
+	// Write file parts.
+	for fieldName, fu := range files {
+		sb.WriteString("--" + boundary + "\r\n")
+		sb.WriteString(fmt.Sprintf("Content-Disposition: form-data; name=%q; filename=%q\r\n", fieldName, fu.filename))
+		sb.WriteString(fmt.Sprintf("Content-Type: %s\r\n", fu.contentType))
+		sb.WriteString("\r\n")
+		sb.Write(fu.content)
+		sb.WriteString("\r\n")
+	}
+
+	sb.WriteString("--" + boundary + "--\r\n")
+
+	return strings.NewReader(sb.String()), "multipart/form-data; boundary=" + boundary
+}

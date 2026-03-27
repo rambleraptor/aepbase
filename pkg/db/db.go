@@ -63,6 +63,21 @@ func createMetaTables(db *sql.DB) error {
 			create_time TEXT NOT NULL
 		)
 	`)
+	if err != nil {
+		return err
+	}
+
+	// Files table for storing uploaded file content.
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS _files (
+			id TEXT PRIMARY KEY,
+			filename TEXT NOT NULL,
+			content_type TEXT NOT NULL,
+			size INTEGER NOT NULL,
+			content BLOB NOT NULL,
+			create_time TEXT NOT NULL
+		)
+	`)
 	return err
 }
 

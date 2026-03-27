@@ -43,6 +43,13 @@ func validateTypes(schema *openapi.Schema, fields map[string]any) error {
 		if val == nil {
 			continue // null is allowed for any type
 		}
+		// File fields store a file ID (string) after multipart processing.
+		if prop.Type == "string" && prop.Format == "file" {
+			if _, ok := val.(string); !ok {
+				return fmt.Errorf("field %q must be a file upload", name)
+			}
+			continue
+		}
 		if err := checkType(name, val, prop.Type); err != nil {
 			return err
 		}

@@ -16,6 +16,7 @@ import (
 	"github.com/aep-dev/aep-lib-go/pkg/openapi"
 
 	"github.com/rambleraptor/aepbase/pkg/db"
+	"github.com/rambleraptor/aepbase/pkg/file"
 	"github.com/rambleraptor/aepbase/pkg/meta"
 	"github.com/rambleraptor/aepbase/pkg/operation"
 	"github.com/rambleraptor/aepbase/pkg/resource"
@@ -389,6 +390,7 @@ func (s *State) rebuildMux() {
 	mux := http.NewServeMux()
 	meta.RegisterRoutes(mux, s)
 	operation.RegisterRoutes(mux, s.DB)
+	file.RegisterRoutes(mux, s.DB)
 	mux.HandleFunc("GET /openapi.json", s.serveOpenAPI)
 	for _, r := range s.API.Resources {
 		// Skip built-in resources — their routes are registered separately above.

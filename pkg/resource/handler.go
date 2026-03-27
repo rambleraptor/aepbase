@@ -15,7 +15,11 @@ import (
 	"github.com/aep-dev/aep-lib-go/pkg/openapi"
 
 	"github.com/rambleraptor/aepbase/pkg/db"
+	"github.com/rambleraptor/aepbase/pkg/file"
 )
+
+// maxUploadSize is the maximum allowed upload size (10 MB).
+const maxUploadSize = 10 << 20
 
 // CustomMethodHandler holds the handler and HTTP method for a custom method.
 type CustomMethodHandler struct {
@@ -103,15 +107,9 @@ func splitCustomMethod(rawID string) (string, string, bool) {
 
 func makeCreateHandler(d *sql.DB, r *api.Resource) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
-		body, err := io.ReadAll(req.Body)
+		fields, err := parseRequestBody(d, req, r.Schema)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "invalid request body")
-			return
-		}
-
-		var fields map[string]any
-		if err := json.Unmarshal(body, &fields); err != nil {
-			writeError(w, http.StatusBadRequest, "invalid JSON")
+			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 
@@ -167,7 +165,7 @@ func makeCreateHandler(d *sql.DB, r *api.Resource) http.HandlerFunc {
 			return
 		}
 
-		writeResourceJSON(w, http.StatusOK, stored, r.Schema)
+		writeResourceJSONWithFiles(w, http.StatusOK, stored, r.Schema, d)
 	}
 }
 
@@ -187,7 +185,7 @@ func makeGetHandler(d *sql.DB, r *api.Resource, idParam string) http.HandlerFunc
 			return
 		}
 
-		writeResourceJSON(w, http.StatusOK, stored, r.Schema)
+		writeResourceJSONWithFiles(w, http.StatusOK, stored, r.Schema, d)
 	}
 }
 
@@ -235,7 +233,9 @@ func makeListHandler(d *sql.DB, r *api.Resource) http.HandlerFunc {
 
 		items := make([]map[string]any, 0, len(results))
 		for _, sr := range results {
-			items = append(items, storedToMap(&sr, r.Schema))
+			m := storedToMap(&sr, r.Schema)
+			expandFileFields(d, m, r.Schema)
+			items = append(items, m)
 		}
 
 		resp := map[string]any{
@@ -266,15 +266,9 @@ func makeUpdateHandler(d *sql.DB, r *api.Resource, idParam string) http.HandlerF
 			return
 		}
 
-		body, err := io.ReadAll(req.Body)
+		patch, err := parseRequestBody(d, req, r.Schema)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "invalid request body")
-			return
-		}
-
-		var patch map[string]any
-		if err := json.Unmarshal(body, &patch); err != nil {
-			writeError(w, http.StatusBadRequest, "invalid JSON")
+			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 
@@ -306,7 +300,7 @@ func makeUpdateHandler(d *sql.DB, r *api.Resource, idParam string) http.HandlerF
 			return
 		}
 
-		writeResourceJSON(w, http.StatusOK, existing, r.Schema)
+		writeResourceJSONWithFiles(w, http.StatusOK, existing, r.Schema, d)
 	}
 }
 
@@ -320,15 +314,9 @@ func makeApplyHandler(d *sql.DB, r *api.Resource, idParam string) http.HandlerFu
 		id := req.PathValue(idParam)
 		path := buildResourcePath(r, allParentIDs, id)
 
-		body, err := io.ReadAll(req.Body)
+		fields, err := parseRequestBody(d, req, r.Schema)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "invalid request body")
-			return
-		}
-
-		var fields map[string]any
-		if err := json.Unmarshal(body, &fields); err != nil {
-			writeError(w, http.StatusBadRequest, "invalid JSON")
+			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 
@@ -371,7 +359,7 @@ func makeApplyHandler(d *sql.DB, r *api.Resource, idParam string) http.HandlerFu
 				writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to update resource: %v", err))
 				return
 			}
-			writeResourceJSON(w, http.StatusOK, existing, r.Schema)
+			writeResourceJSONWithFiles(w, http.StatusOK, existing, r.Schema, d)
 		} else {
 			// Create new resource.
 			stored := &StoredResource{
@@ -385,7 +373,7 @@ func makeApplyHandler(d *sql.DB, r *api.Resource, idParam string) http.HandlerFu
 				writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to create resource: %v", err))
 				return
 			}
-			writeResourceJSON(w, http.StatusOK, stored, r.Schema)
+			writeResourceJSONWithFiles(w, http.StatusOK, stored, r.Schema, d)
 		}
 	}
 }
@@ -651,6 +639,16 @@ func writeResourceJSON(w http.ResponseWriter, status int, s *StoredResource, sch
 	json.NewEncoder(w).Encode(storedToMap(s, schema))
 }
 
+// writeResourceJSONWithFiles is like writeResourceJSON but expands file fields
+// to include metadata instead of bare file IDs.
+func writeResourceJSONWithFiles(w http.ResponseWriter, status int, s *StoredResource, schema *openapi.Schema, d *sql.DB) {
+	m := storedToMap(s, schema)
+	expandFileFields(d, m, schema)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(m)
+}
+
 func writeError(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -679,4 +677,131 @@ func columnsFromSchema(schema *openapi.Schema) []db.ColumnDef {
 		})
 	}
 	return cols
+}
+
+// isFileField returns true if the schema property represents a file upload field.
+func isFileField(prop openapi.Schema) bool {
+	return prop.Type == "string" && prop.Format == "file"
+}
+
+// hasFileFields returns true if the schema has any file-type fields.
+func hasFileFields(schema *openapi.Schema) bool {
+	for _, prop := range schema.Properties {
+		if isFileField(prop) {
+			return true
+		}
+	}
+	return false
+}
+
+// isMultipart checks if the content type is multipart/form-data.
+func isMultipart(contentType string) bool {
+	return len(contentType) >= 19 && contentType[:19] == "multipart/form-data"
+}
+
+// parseRequestBody parses the request body as either JSON or multipart/form-data.
+// For multipart requests, JSON fields come from a "data" form field, and file
+// fields are uploaded as named file parts matching schema field names.
+// File content is stored in the _files table and the field value is set to the file ID.
+func parseRequestBody(d *sql.DB, req *http.Request, schema *openapi.Schema) (map[string]any, error) {
+	contentType := req.Header.Get("Content-Type")
+
+	if isMultipart(contentType) {
+		return parseMultipartBody(d, req, schema)
+	}
+
+	// Standard JSON body.
+	body, err := io.ReadAll(req.Body)
+	if err != nil {
+		return nil, fmt.Errorf("invalid request body")
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(body, &fields); err != nil {
+		return nil, fmt.Errorf("invalid JSON")
+	}
+	return fields, nil
+}
+
+// parseMultipartBody handles multipart/form-data requests.
+// The "data" field contains JSON for non-file fields. Named file parts
+// matching schema file fields are uploaded and stored.
+func parseMultipartBody(d *sql.DB, req *http.Request, schema *openapi.Schema) (map[string]any, error) {
+	req.Body = http.MaxBytesReader(nil, req.Body, maxUploadSize)
+	if err := req.ParseMultipartForm(maxUploadSize); err != nil {
+		return nil, fmt.Errorf("failed to parse multipart form: %v", err)
+	}
+
+	// Parse JSON data from the "data" form field.
+	fields := make(map[string]any)
+	if dataJSON := req.FormValue("data"); dataJSON != "" {
+		if err := json.Unmarshal([]byte(dataJSON), &fields); err != nil {
+			return nil, fmt.Errorf("invalid JSON in 'data' field: %v", err)
+		}
+	}
+
+	// Process file fields.
+	for propName, prop := range schema.Properties {
+		if !isFileField(prop) {
+			continue
+		}
+		f, header, err := req.FormFile(propName)
+		if err != nil {
+			continue // File not provided in this request — skip.
+		}
+		defer f.Close()
+
+		content, err := io.ReadAll(f)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read file for field %q: %v", propName, err)
+		}
+		if len(content) == 0 {
+			return nil, fmt.Errorf("uploaded file for field %q is empty", propName)
+		}
+
+		fileContentType := header.Header.Get("Content-Type")
+		if fileContentType == "" {
+			fileContentType = "application/octet-stream"
+		}
+
+		fileID := file.GenerateID()
+		now := req.Header.Get("X-Request-Time") // not expected; just use real time
+		if now == "" {
+			now = time.Now().UTC().Format(time.RFC3339)
+		}
+
+		stored := &file.File{
+			ID:          fileID,
+			Filename:    header.Filename,
+			ContentType: fileContentType,
+			Size:        int64(len(content)),
+			Content:     content,
+			CreateTime:  now,
+		}
+		if err := file.Insert(d, stored); err != nil {
+			return nil, fmt.Errorf("failed to store file for field %q: %v", propName, err)
+		}
+
+		// Set the field value to the file ID so it's stored in the resource table.
+		fields[propName] = fileID
+	}
+
+	return fields, nil
+}
+
+// expandFileFields replaces file ID values with file metadata objects in a resource map.
+func expandFileFields(d *sql.DB, m map[string]any, schema *openapi.Schema) {
+	for propName, prop := range schema.Properties {
+		if !isFileField(prop) {
+			continue
+		}
+		fileID, ok := m[propName].(string)
+		if !ok || fileID == "" {
+			continue
+		}
+		meta, err := file.GetMetadata(d, fileID)
+		if err != nil || meta == nil {
+			continue
+		}
+		m[propName] = meta.ToMetadataMap()
+	}
 }
