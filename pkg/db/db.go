@@ -20,8 +20,12 @@ func Init(dbPath string) (*sql.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("opening database: %w", err)
 	}
+	db.SetMaxOpenConns(1)
 	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
 		return nil, fmt.Errorf("enabling WAL: %w", err)
+	}
+	if _, err := db.Exec("PRAGMA busy_timeout=5000"); err != nil {
+		return nil, fmt.Errorf("setting busy timeout: %w", err)
 	}
 	if err := createMetaTables(db); err != nil {
 		return nil, fmt.Errorf("creating meta tables: %w", err)

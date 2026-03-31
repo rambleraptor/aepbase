@@ -113,7 +113,8 @@ func NewState(d *sql.DB, serverURL string) *State {
 				"description": {Type: "string", Description: "A human-readable description of the resource."},
 				"examples":    {Type: "object", Description: "Example values for the resource's fields, keyed by field name."},
 				"schema":      {Type: "object", Description: "The JSON Schema defining the resource's properties."},
-				"parents":     {Type: "array", Items: &openapi.Schema{Type: "string"}, Description: "The singular names of parent resources for nested resources."},
+				"parents":         {Type: "array", Items: &openapi.Schema{Type: "string"}, Description: "The singular names of parent resources for nested resources."},
+				"user_settable_id": {Type: "boolean", Description: "Whether clients can set the resource ID on creation."},
 				"create_time": {Type: "string", Format: "date-time", ReadOnly: true, Description: "The time this resource definition was created."},
 				"update_time": {Type: "string", Format: "date-time", ReadOnly: true, Description: "The time this resource definition was last updated."},
 			},
@@ -122,7 +123,7 @@ func NewState(d *sql.DB, serverURL string) *State {
 		Methods: api.Methods{
 			Get:    &api.GetMethod{},
 			List:   &api.ListMethod{},
-			Create: &api.CreateMethod{SupportsUserSettableCreate: true},
+			Create: &api.CreateMethod{},
 			Update: &api.UpdateMethod{},
 			Delete: &api.DeleteMethod{},
 		},
@@ -204,7 +205,7 @@ func (s *State) AddResource(def meta.ResourceDefinition) error {
 		methods = api.Methods{
 			Get:    &api.GetMethod{},
 			List:   &api.ListMethod{SupportsFilter: true, SupportsSkip: true},
-			Create: &api.CreateMethod{SupportsUserSettableCreate: true},
+			Create: &api.CreateMethod{SupportsUserSettableCreate: def.UserSettableId},
 			Update: &api.UpdateMethod{},
 			Delete: &api.DeleteMethod{},
 			Apply:  &api.ApplyMethod{},

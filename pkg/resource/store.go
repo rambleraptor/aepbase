@@ -3,6 +3,7 @@ package resource
 import (
 	"database/sql"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -71,7 +72,8 @@ func Get(d *sql.DB, plural string, path string, schema *openapi.Schema) (*Stored
 		return nil, err
 	}
 	for i, name := range propNames {
-		r.Fields[name] = *(fieldPtrs[i].(*any))
+		val := *(fieldPtrs[i].(*any))
+		r.Fields[name] = coerceFieldValue(val, schema, name)
 	}
 	return r, nil
 }
@@ -142,7 +144,8 @@ func List(d *sql.DB, plural string, parentIDs map[string]string, schema *openapi
 			return nil, "", err
 		}
 		for i, name := range propNames {
-			r.Fields[name] = *(fieldPtrs[i].(*any))
+			val := *(fieldPtrs[i].(*any))
+			r.Fields[name] = coerceFieldValue(val, schema, name)
 		}
 		results = append(results, r)
 	}
@@ -194,6 +197,30 @@ func schemaTypeToCEL(schemaType string) *cel.Type {
 	default:
 		return cel.StringType
 	}
+}
+
+// coerceFieldValue converts SQLite-stored values back to their schema types.
+// For example, SQLite stores booleans as integers (0/1), so this converts
+// them back to Go bools when the schema type is "boolean".
+func coerceFieldValue(val any, schema *openapi.Schema, name string) any {
+	prop, ok := schema.Properties[name]
+	if !ok {
+		return val
+	}
+	switch prop.Type {
+	case "boolean":
+		switch v := val.(type) {
+		case int64:
+			return v != 0
+		case float64:
+			return v != 0
+		}
+	case "object", "array":
+		if s, ok := val.(string); ok && s != "" {
+			return json.RawMessage(s)
+		}
+	}
+	return val
 }
 
 func Update(d *sql.DB, plural string, path string, fields map[string]any, updateTime string, schema *openapi.Schema) error {
