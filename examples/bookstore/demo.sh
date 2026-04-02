@@ -25,6 +25,7 @@ echo "Creating publisher aep_resource_definition..."
 aepcli "$API" aep_resource_definition create \
   --singular publisher \
   --plural publishers \
+  --user_settable_create \
   --schema '{"type":"object","properties":{"name":{"type":"string"},"location":{"type":"string"}}}'
 
 echo ""
@@ -32,6 +33,7 @@ echo "Creating book aep_resource_definition (child of publisher)..."
 aepcli "$API" aep_resource_definition create \
   --singular book \
   --plural books \
+  --user_settable_create \
   --schema '{"type":"object","properties":{"title":{"type":"string"},"author":{"type":"string"},"published":{"type":"boolean"},"purchase_count":{"type":"integer"}}}' \
   --parents publisher
 
