@@ -14,7 +14,7 @@ type ResourceDefinition struct {
 	Schema          openapi.Schema    `json:"schema"`
 	Parents         []string          `json:"parents,omitempty"`
 	Singleton       bool              `json:"singleton,omitempty"`
-	UserSettableId  bool              `json:"user_settable_id,omitempty"`
+	UserSettableId  bool              `json:"user_settable_create,omitempty"`
 	CreateTime      string            `json:"create_time,omitempty"`
 	UpdateTime      string            `json:"update_time,omitempty"`
 }
