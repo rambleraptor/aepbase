@@ -22,14 +22,14 @@ echo ""
 echo "--- Creating resource aep_resource_definitions ---"
 
 echo "Creating publisher aep_resource_definition..."
-aepcli "$API" aep_resource_definition create publisher \
+aepcli "$API" aep_resource_definition create \
   --singular publisher \
   --plural publishers \
   --schema '{"type":"object","properties":{"name":{"type":"string"},"location":{"type":"string"}}}'
 
 echo ""
 echo "Creating book aep_resource_definition (child of publisher)..."
-aepcli "$API" aep_resource_definition create book \
+aepcli "$API" aep_resource_definition create \
   --singular book \
   --plural books \
   --schema '{"type":"object","properties":{"title":{"type":"string"},"author":{"type":"string"},"published":{"type":"boolean"},"purchase_count":{"type":"integer"}}}' \
