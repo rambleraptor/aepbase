@@ -23,7 +23,11 @@ type CustomMethodHandler struct {
 	Handler http.HandlerFunc
 }
 
-func RegisterRoutes(mux *http.ServeMux, d *sql.DB, r *api.Resource, customMethods map[string]CustomMethodHandler) {
+// FieldEnums maps a field name to the set of allowed string values for that field.
+// A nil or empty map means no enum constraints are applied.
+type FieldEnums = map[string][]string
+
+func RegisterRoutes(mux *http.ServeMux, d *sql.DB, r *api.Resource, customMethods map[string]CustomMethodHandler, enums FieldEnums) {
 	elems := r.PatternElems()
 	collectionPath := "/" + strings.Join(elems[:len(elems)-1], "/")
 	resourcePath := "/" + strings.Join(elems, "/")
@@ -31,21 +35,21 @@ func RegisterRoutes(mux *http.ServeMux, d *sql.DB, r *api.Resource, customMethod
 	// The last pattern element is the resource ID param, e.g. "{book_id}".
 	idParam := strings.Trim(elems[len(elems)-1], "{}")
 
-	mux.HandleFunc("POST "+collectionPath, makeCreateHandler(d, r))
+	mux.HandleFunc("POST "+collectionPath, makeCreateHandler(d, r, enums))
 	mux.HandleFunc("GET "+collectionPath, makeListHandler(d, r))
 	mux.HandleFunc("GET "+resourcePath, makeGetOrCustomHandler(d, r, customMethods, idParam))
 	mux.HandleFunc("POST "+resourcePath, makePostCustomHandler(r, customMethods, idParam))
-	mux.HandleFunc("PATCH "+resourcePath, makeUpdateHandler(d, r, idParam))
-	mux.HandleFunc("PUT "+resourcePath, makeApplyHandler(d, r, idParam))
+	mux.HandleFunc("PATCH "+resourcePath, makeUpdateHandler(d, r, idParam, enums))
+	mux.HandleFunc("PUT "+resourcePath, makeApplyHandler(d, r, idParam, enums))
 	mux.HandleFunc("DELETE "+resourcePath, makeDeleteHandler(d, r, idParam))
 }
 
 // RegisterSingletonRoutes registers GET and PATCH routes for a singleton resource.
 // Singleton resources have a fixed path like /parents/{parent_id}/singular
 // with no collection endpoints and no resource ID in the path.
-func RegisterSingletonRoutes(mux *http.ServeMux, d *sql.DB, r *api.Resource, singletonPath string) {
+func RegisterSingletonRoutes(mux *http.ServeMux, d *sql.DB, r *api.Resource, singletonPath string, enums FieldEnums) {
 	mux.HandleFunc("GET "+singletonPath, makeSingletonGetHandler(d, r))
-	mux.HandleFunc("PATCH "+singletonPath, makeSingletonUpdateHandler(d, r))
+	mux.HandleFunc("PATCH "+singletonPath, makeSingletonUpdateHandler(d, r, enums))
 }
 
 // makeGetOrCustomHandler returns a handler that serves GET for both regular
@@ -101,7 +105,7 @@ func splitCustomMethod(rawID string) (string, string, bool) {
 	return rawID[:idx], rawID[idx+1:], true
 }
 
-func makeCreateHandler(d *sql.DB, r *api.Resource) http.HandlerFunc {
+func makeCreateHandler(d *sql.DB, r *api.Resource, enums FieldEnums) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
 		body, err := io.ReadAll(req.Body)
 		if err != nil {
@@ -146,6 +150,12 @@ func makeCreateHandler(d *sql.DB, r *api.Resource) http.HandlerFunc {
 
 		// Validate field types.
 		if err := validateTypes(r.Schema, fields); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
+		// Validate enum constraints.
+		if err := validateEnums(enums, fields); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -250,7 +260,7 @@ func makeListHandler(d *sql.DB, r *api.Resource) http.HandlerFunc {
 	}
 }
 
-func makeUpdateHandler(d *sql.DB, r *api.Resource, idParam string) http.HandlerFunc {
+func makeUpdateHandler(d *sql.DB, r *api.Resource, idParam string, enums FieldEnums) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
 		parentIDs := extractParentIDs(req, r)
 		id := req.PathValue(idParam)
@@ -293,6 +303,12 @@ func makeUpdateHandler(d *sql.DB, r *api.Resource, idParam string) http.HandlerF
 			return
 		}
 
+		// Validate enum constraints on the patch values.
+		if err := validateEnums(enums, patch); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
 		// Merge patch onto existing fields.
 		for k, v := range patch {
 			existing.Fields[k] = v
@@ -313,7 +329,7 @@ func makeUpdateHandler(d *sql.DB, r *api.Resource, idParam string) http.HandlerF
 // makeApplyHandler returns a handler for the Apply (PUT) method.
 // Apply is a declarative create-or-update: if the resource exists it replaces it fully,
 // if it doesn't exist it creates it.
-func makeApplyHandler(d *sql.DB, r *api.Resource, idParam string) http.HandlerFunc {
+func makeApplyHandler(d *sql.DB, r *api.Resource, idParam string, enums FieldEnums) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
 		allParentIDs := extractParentIDs(req, r)
 		directParentIDs := extractDirectParentIDs(allParentIDs, r)
@@ -349,6 +365,12 @@ func makeApplyHandler(d *sql.DB, r *api.Resource, idParam string) http.HandlerFu
 
 		// Validate field types.
 		if err := validateTypes(r.Schema, fields); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
+		// Validate enum constraints.
+		if err := validateEnums(enums, fields); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -445,7 +467,7 @@ func makeSingletonGetHandler(d *sql.DB, r *api.Resource) http.HandlerFunc {
 
 // makeSingletonUpdateHandler returns a handler for PATCH on a singleton resource.
 // If the singleton doesn't exist yet, it is implicitly created with the patch values.
-func makeSingletonUpdateHandler(d *sql.DB, r *api.Resource) http.HandlerFunc {
+func makeSingletonUpdateHandler(d *sql.DB, r *api.Resource, enums FieldEnums) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
 		parentIDs := extractSingletonParentIDs(req, r)
 		path := buildSingletonPath(r, parentIDs)
@@ -473,6 +495,12 @@ func makeSingletonUpdateHandler(d *sql.DB, r *api.Resource) http.HandlerFunc {
 
 		// Validate field types on the patch values.
 		if err := validateTypes(r.Schema, patch); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
+		// Validate enum constraints on the patch values.
+		if err := validateEnums(enums, patch); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}

@@ -50,6 +50,46 @@ func validateTypes(schema *openapi.Schema, fields map[string]any) error {
 	return nil
 }
 
+// validateEnums checks that each field value is one of the allowed enum values
+// declared for that field. Fields without an entry in enums are unconstrained.
+// Values of nil are allowed (to permit clearing a field).
+func validateEnums(enums map[string][]string, fields map[string]any) error {
+	if len(enums) == 0 {
+		return nil
+	}
+	for name, val := range fields {
+		if val == nil {
+			continue
+		}
+		allowed, ok := enums[name]
+		if !ok {
+			continue
+		}
+		if err := checkEnum(name, val, allowed); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// checkEnum validates that val is one of the allowed enum values, if any are defined.
+// Enum values are strings, so val must be a string when enum is set.
+func checkEnum(name string, val any, enum []string) error {
+	if len(enum) == 0 {
+		return nil
+	}
+	s, ok := val.(string)
+	if !ok {
+		return fmt.Errorf("field %q must be one of %s", name, strings.Join(enum, ", "))
+	}
+	for _, allowed := range enum {
+		if s == allowed {
+			return nil
+		}
+	}
+	return fmt.Errorf("field %q must be one of %s", name, strings.Join(enum, ", "))
+}
+
 // checkType validates a single value against an expected OpenAPI type.
 func checkType(name string, val any, expectedType string) error {
 	switch expectedType {
