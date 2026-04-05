@@ -44,6 +44,13 @@ func makeCreateHandler(state StateManager) http.HandlerFunc {
 			return
 		}
 
+		// Auto-detect file fields from schema extensions in the raw JSON.
+		// openapi.Schema drops unknown extensions, so we must re-parse the
+		// body to find `x-aepbase-file-field: true` markers on properties.
+		if detected := extractFileFieldsFromRaw(body); len(detected) > 0 {
+			def.FileFields = mergeStringSets(def.FileFields, detected)
+		}
+
 		if def.Singular == "" || def.Plural == "" {
 			writeError(w, http.StatusBadRequest, "singular and plural are required")
 			return
@@ -239,6 +246,12 @@ func makeUpdateHandler(state StateManager) http.HandlerFunc {
 			existing.Enums = patch.Enums
 		}
 
+		// Re-detect file fields from the patched schema body and merge with
+		// any explicit file_fields entry from the client.
+		if detected := extractFileFieldsFromRaw(body); len(detected) > 0 || patch.FileFields != nil {
+			existing.FileFields = mergeStringSets(patch.FileFields, detected)
+		}
+
 		now := time.Now().UTC().Format(time.RFC3339)
 		existing.UpdateTime = now
 
@@ -292,32 +305,77 @@ func insertDefinition(db *sql.DB, def *ResourceDefinition) error {
 	parentsJSON, _ := json.Marshal(def.Parents)
 	examplesJSON, _ := json.Marshal(def.Examples)
 	enumsJSON, _ := json.Marshal(def.Enums)
+	fileFieldsJSON, _ := json.Marshal(def.FileFields)
 	singletonInt := 0
 	if def.Singleton {
 		singletonInt = 1
 	}
 	_, err := db.Exec(
-		"INSERT INTO _aep_resource_definitions (id, singular, plural, description, examples_json, schema_json, parents_json, enums_json, singleton, create_time, update_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-		def.ID, def.Singular, def.Plural, def.Description, string(examplesJSON), string(schemaJSON), string(parentsJSON), string(enumsJSON), singletonInt, def.CreateTime, def.UpdateTime,
+		"INSERT INTO _aep_resource_definitions (id, singular, plural, description, examples_json, schema_json, parents_json, enums_json, file_fields_json, singleton, create_time, update_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		def.ID, def.Singular, def.Plural, def.Description, string(examplesJSON), string(schemaJSON), string(parentsJSON), string(enumsJSON), string(fileFieldsJSON), singletonInt, def.CreateTime, def.UpdateTime,
 	)
 	return err
 }
 
+// extractFileFieldsFromRaw scans a raw resource definition JSON body and
+// returns the names of all properties marked with x-aepbase-file-field: true.
+// openapi.Schema does not preserve unknown extensions during unmarshal, so
+// file fields must be discovered from the raw bytes.
+func extractFileFieldsFromRaw(body []byte) []string {
+	var raw struct {
+		Schema struct {
+			Properties map[string]map[string]any `json:"properties"`
+		} `json:"schema"`
+	}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return nil
+	}
+	var names []string
+	for name, prop := range raw.Schema.Properties {
+		if v, ok := prop["x-aepbase-file-field"]; ok {
+			if b, ok := v.(bool); ok && b {
+				names = append(names, name)
+			}
+		}
+	}
+	return names
+}
+
+// mergeStringSets returns the union of a and b preserving the order of a
+// followed by new elements from b.
+func mergeStringSets(a, b []string) []string {
+	seen := make(map[string]bool, len(a)+len(b))
+	out := make([]string, 0, len(a)+len(b))
+	for _, s := range a {
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	for _, s := range b {
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 func getDefinitionByID(db *sql.DB, id string) (*ResourceDefinition, error) {
-	row := db.QueryRow("SELECT id, singular, plural, description, examples_json, schema_json, parents_json, enums_json, singleton, create_time, update_time FROM _aep_resource_definitions WHERE id = ?", id)
+	row := db.QueryRow("SELECT id, singular, plural, description, examples_json, schema_json, parents_json, enums_json, file_fields_json, singleton, create_time, update_time FROM _aep_resource_definitions WHERE id = ?", id)
 	return scanDefinition(row)
 }
 
 func getDefinition(db *sql.DB, singular string) (*ResourceDefinition, error) {
-	row := db.QueryRow("SELECT id, singular, plural, description, examples_json, schema_json, parents_json, enums_json, singleton, create_time, update_time FROM _aep_resource_definitions WHERE singular = ?", singular)
+	row := db.QueryRow("SELECT id, singular, plural, description, examples_json, schema_json, parents_json, enums_json, file_fields_json, singleton, create_time, update_time FROM _aep_resource_definitions WHERE singular = ?", singular)
 	return scanDefinition(row)
 }
 
 func scanDefinition(row *sql.Row) (*ResourceDefinition, error) {
 	var def ResourceDefinition
-	var schemaJSON, parentsJSON, examplesJSON, enumsJSON string
+	var schemaJSON, parentsJSON, examplesJSON, enumsJSON, fileFieldsJSON string
 	var singletonInt int
-	err := row.Scan(&def.ID, &def.Singular, &def.Plural, &def.Description, &examplesJSON, &schemaJSON, &parentsJSON, &enumsJSON, &singletonInt, &def.CreateTime, &def.UpdateTime)
+	err := row.Scan(&def.ID, &def.Singular, &def.Plural, &def.Description, &examplesJSON, &schemaJSON, &parentsJSON, &enumsJSON, &fileFieldsJSON, &singletonInt, &def.CreateTime, &def.UpdateTime)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -330,6 +388,9 @@ func scanDefinition(row *sql.Row) (*ResourceDefinition, error) {
 	if enumsJSON != "" {
 		json.Unmarshal([]byte(enumsJSON), &def.Enums)
 	}
+	if fileFieldsJSON != "" {
+		json.Unmarshal([]byte(fileFieldsJSON), &def.FileFields)
+	}
 	def.Singleton = singletonInt != 0
 	def.Path = "aep-resource-definitions/" + def.ID
 	return &def, nil
@@ -340,12 +401,12 @@ func listDefinitions(db *sql.DB, limit int, cursor string) ([]ResourceDefinition
 	var err error
 	if cursor != "" {
 		rows, err = db.Query(
-			"SELECT id, singular, plural, description, examples_json, schema_json, parents_json, enums_json, singleton, create_time, update_time FROM _aep_resource_definitions WHERE id > ? ORDER BY id LIMIT ?",
+			"SELECT id, singular, plural, description, examples_json, schema_json, parents_json, enums_json, file_fields_json, singleton, create_time, update_time FROM _aep_resource_definitions WHERE id > ? ORDER BY id LIMIT ?",
 			cursor, limit,
 		)
 	} else {
 		rows, err = db.Query(
-			"SELECT id, singular, plural, description, examples_json, schema_json, parents_json, enums_json, singleton, create_time, update_time FROM _aep_resource_definitions ORDER BY id LIMIT ?",
+			"SELECT id, singular, plural, description, examples_json, schema_json, parents_json, enums_json, file_fields_json, singleton, create_time, update_time FROM _aep_resource_definitions ORDER BY id LIMIT ?",
 			limit,
 		)
 	}
@@ -357,9 +418,9 @@ func listDefinitions(db *sql.DB, limit int, cursor string) ([]ResourceDefinition
 	var defs []ResourceDefinition
 	for rows.Next() {
 		var def ResourceDefinition
-		var schemaJSON, parentsJSON, examplesJSON, enumsJSON string
+		var schemaJSON, parentsJSON, examplesJSON, enumsJSON, fileFieldsJSON string
 		var singletonInt int
-		if err := rows.Scan(&def.ID, &def.Singular, &def.Plural, &def.Description, &examplesJSON, &schemaJSON, &parentsJSON, &enumsJSON, &singletonInt, &def.CreateTime, &def.UpdateTime); err != nil {
+		if err := rows.Scan(&def.ID, &def.Singular, &def.Plural, &def.Description, &examplesJSON, &schemaJSON, &parentsJSON, &enumsJSON, &fileFieldsJSON, &singletonInt, &def.CreateTime, &def.UpdateTime); err != nil {
 			return nil, err
 		}
 		json.Unmarshal([]byte(schemaJSON), &def.Schema)
@@ -367,6 +428,9 @@ func listDefinitions(db *sql.DB, limit int, cursor string) ([]ResourceDefinition
 		json.Unmarshal([]byte(examplesJSON), &def.Examples)
 		if enumsJSON != "" {
 			json.Unmarshal([]byte(enumsJSON), &def.Enums)
+		}
+		if fileFieldsJSON != "" {
+			json.Unmarshal([]byte(fileFieldsJSON), &def.FileFields)
 		}
 		def.Singleton = singletonInt != 0
 		def.Path = "aep-resource-definitions/" + def.ID
@@ -379,9 +443,10 @@ func updateDefinition(db *sql.DB, def *ResourceDefinition) error {
 	schemaJSON, _ := json.Marshal(def.Schema)
 	examplesJSON, _ := json.Marshal(def.Examples)
 	enumsJSON, _ := json.Marshal(def.Enums)
+	fileFieldsJSON, _ := json.Marshal(def.FileFields)
 	_, err := db.Exec(
-		"UPDATE _aep_resource_definitions SET description = ?, examples_json = ?, schema_json = ?, enums_json = ?, update_time = ? WHERE id = ?",
-		def.Description, string(examplesJSON), string(schemaJSON), string(enumsJSON), def.UpdateTime, def.ID,
+		"UPDATE _aep_resource_definitions SET description = ?, examples_json = ?, schema_json = ?, enums_json = ?, file_fields_json = ?, update_time = ? WHERE id = ?",
+		def.Description, string(examplesJSON), string(schemaJSON), string(enumsJSON), string(fileFieldsJSON), def.UpdateTime, def.ID,
 	)
 	return err
 }
