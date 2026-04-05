@@ -710,12 +710,12 @@ func TestOpenAPIAfterDelete(t *testing.T) {
 	if !ok {
 		paths = map[string]any{}
 	}
-	// After deleting the user resource, only the built-in meta and operation paths should remain.
+	// After deleting the user resource, only the built-in meta paths should
+	// remain. The operations resource is only exposed when an async custom
+	// method has been registered.
 	builtinPaths := map[string]bool{
-		"/aep-resource-definitions":                          true,
+		"/aep-resource-definitions":                              true,
 		"/aep-resource-definitions/{aep_resource_definition_id}": true,
-		"/operations":                  true,
-		"/operations/{operation_id}":   true,
 	}
 	for p := range paths {
 		if !builtinPaths[p] {
@@ -1679,9 +1679,41 @@ func TestDeleteResourceWithGrandchildren(t *testing.T) {
 
 // --- Operations Tests ---
 
+// registerNoopAsyncMethod registers a trivial async custom method on a
+// resource so the built-in operations resource gets exposed.
+func registerNoopAsyncMethod(t *testing.T, state *aepbase.State, resourceSingular string) {
+	t.Helper()
+	err := state.AddCustomMethod(resourceSingular, "noop", aepbase.CustomMethodConfig{
+		Method: "POST",
+		Async:  true,
+		RequestSchema: &openapi.Schema{
+			Type:       "object",
+			Properties: openapi.Properties{},
+		},
+		ResponseSchema: &openapi.Schema{
+			Type:       "object",
+			Properties: openapi.Properties{},
+		},
+		Handler: func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{})
+		},
+	})
+	if err != nil {
+		t.Fatalf("AddCustomMethod: %v", err)
+	}
+}
+
 func TestOperationsListEmpty(t *testing.T) {
 	state := newTestState(t)
 	h := state.Handler()
+
+	// The operations resource is only exposed after an async custom method
+	// has been registered.
+	createResource(t, h, "book", "book", "books", nil, map[string]any{
+		"title": map[string]any{"type": "string"},
+	})
+	registerNoopAsyncMethod(t, state, "book")
 
 	resp := doRequest(t, h, "GET", "/operations", "")
 	if resp.StatusCode != 200 {
@@ -1698,9 +1730,43 @@ func TestOperationsGetNotFound(t *testing.T) {
 	state := newTestState(t)
 	h := state.Handler()
 
+	createResource(t, h, "book", "book", "books", nil, map[string]any{
+		"title": map[string]any{"type": "string"},
+	})
+	registerNoopAsyncMethod(t, state, "book")
+
 	resp := doRequest(t, h, "GET", "/operations/nonexistent", "")
 	if resp.StatusCode != 404 {
 		t.Fatalf("expected 404, got %d", resp.StatusCode)
+	}
+}
+
+func TestOperationsNotExposedWithoutAsyncMethod(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+
+	// With no async custom methods registered, /operations should not be
+	// exposed at all.
+	resp := doRequest(t, h, "GET", "/operations", "")
+	if resp.StatusCode != 404 {
+		t.Fatalf("expected 404, got %d", resp.StatusCode)
+	}
+
+	// The OpenAPI spec should not contain any operation paths or schema.
+	specResp := doRequest(t, h, "GET", "/openapi.json", "")
+	m := readJSON(t, specResp)
+	paths, _ := m["paths"].(map[string]any)
+	for p := range paths {
+		if strings.HasPrefix(p, "/operations") {
+			t.Errorf("did not expect operations path %q without async method", p)
+		}
+	}
+	if components, ok := m["components"].(map[string]any); ok {
+		if schemas, ok := components["schemas"].(map[string]any); ok {
+			if _, ok := schemas["operation"]; ok {
+				t.Error("did not expect operation schema without async method")
+			}
+		}
 	}
 }
 
