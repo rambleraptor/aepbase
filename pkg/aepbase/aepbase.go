@@ -133,30 +133,6 @@ func NewState(d *sql.DB, serverURL string) *State {
 	metaResource.API = s.API
 	s.API.Resources[metaResourceSingular] = metaResource
 
-	// Register the operation resource for OpenAPI generation.
-	operationResource := &api.Resource{
-		Singular: "operation",
-		Plural:   "operations",
-		Schema: &openapi.Schema{
-			Type: "object",
-			Properties: openapi.Properties{
-				"id":          {Type: "string", ReadOnly: true, Description: "The unique identifier for this operation."},
-				"path":        {Type: "string", ReadOnly: true, Description: "The full resource path (e.g. operations/abc123)."},
-				"done":        {Type: "boolean", ReadOnly: true, Description: "Whether the operation has completed."},
-				"error":       {Type: "object", ReadOnly: true, Description: "Error details if the operation failed."},
-				"response":    {Type: "object", ReadOnly: true, Description: "The result of the operation, available when done is true."},
-				"create_time": {Type: "string", Format: "date-time", ReadOnly: true, Description: "The time the operation was created."},
-			},
-		},
-		Children: []*api.Resource{},
-		Methods: api.Methods{
-			Get:  &api.GetMethod{},
-			List: &api.ListMethod{},
-		},
-	}
-	operationResource.API = s.API
-	s.API.Resources[operationResourceSingular] = operationResource
-
 	s.rebuildMux()
 	return s
 }
@@ -401,7 +377,10 @@ func (s *State) UpdateResourceSchema(def meta.ResourceDefinition, oldDef meta.Re
 func (s *State) rebuildMux() {
 	mux := http.NewServeMux()
 	meta.RegisterRoutes(mux, s)
-	operation.RegisterRoutes(mux, s.DB)
+	// Only expose the operations resource when an async custom method exists.
+	if _, ok := s.API.Resources[operationResourceSingular]; ok {
+		operation.RegisterRoutes(mux, s.DB)
+	}
 	mux.HandleFunc("GET /openapi.json", s.serveOpenAPI)
 	for _, r := range s.API.Resources {
 		// Skip built-in resources — their routes are registered separately above.
@@ -1027,9 +1006,11 @@ func (s *State) addCustomMethodLocked(resourceSingular, methodName string, confi
 		return fmt.Errorf("Handler is required")
 	}
 
-	// Wrap async handlers so callers get an Operation back.
+	// Wrap async handlers so callers get an Operation back, and ensure the
+	// built-in operations resource is registered so callers can poll results.
 	if config.Async {
 		config.Handler = s.wrapAsyncHandler(config.Handler)
+		s.ensureOperationResource()
 	}
 
 	reg := customMethodRegistration{
@@ -1066,6 +1047,37 @@ func (s *State) addCustomMethodLocked(resourceSingular, methodName string, confi
 
 	s.rebuildMux()
 	return nil
+}
+
+// ensureOperationResource registers the built-in operations resource on the
+// API if it isn't already registered. The resource is only exposed when at
+// least one async custom method has been registered.
+func (s *State) ensureOperationResource() {
+	if _, ok := s.API.Resources[operationResourceSingular]; ok {
+		return
+	}
+	operationResource := &api.Resource{
+		Singular: "operation",
+		Plural:   "operations",
+		Schema: &openapi.Schema{
+			Type: "object",
+			Properties: openapi.Properties{
+				"id":          {Type: "string", ReadOnly: true, Description: "The unique identifier for this operation."},
+				"path":        {Type: "string", ReadOnly: true, Description: "The full resource path (e.g. operations/abc123)."},
+				"done":        {Type: "boolean", ReadOnly: true, Description: "Whether the operation has completed."},
+				"error":       {Type: "object", ReadOnly: true, Description: "Error details if the operation failed."},
+				"response":    {Type: "object", ReadOnly: true, Description: "The result of the operation, available when done is true."},
+				"create_time": {Type: "string", Format: "date-time", ReadOnly: true, Description: "The time the operation was created."},
+			},
+		},
+		Children: []*api.Resource{},
+		Methods: api.Methods{
+			Get:  &api.GetMethod{},
+			List: &api.ListMethod{},
+		},
+	}
+	operationResource.API = s.API
+	s.API.Resources[operationResourceSingular] = operationResource
 }
 
 // asyncOperationSchema returns an Operation-shaped schema where the response
