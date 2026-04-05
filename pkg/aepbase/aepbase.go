@@ -58,6 +58,12 @@ type State struct {
 	resourceExamples      map[string]map[string]any      // singular -> field -> example value
 	singletonResources    map[string]bool                // singular -> true for singleton resources
 	resourceEnums         map[string]map[string][]string // singular -> field name -> allowed enum values
+	// File-field support (library-only, opt-in, off by default). When
+	// fileFieldsEnabled is false, schemas containing x-aepbase-file-field
+	// are rejected at resource registration time.
+	fileFieldsEnabled  bool
+	filesDir           string
+	resourceFileFields map[string]map[string]bool // singular -> field name -> true
 }
 
 // metaResourceSingular is the singular name for the built-in meta resource.
@@ -83,6 +89,7 @@ func NewState(d *sql.DB, serverURL string) *State {
 		},
 		singletonResources: make(map[string]bool),
 		resourceEnums:      make(map[string]map[string][]string),
+		resourceFileFields: make(map[string]map[string]bool),
 		resourceDescriptions: map[string]string{
 			"aep-resource-definition": "A resource definition. Create these to dynamically add new API endpoints.",
 		},
@@ -137,6 +144,24 @@ func NewState(d *sql.DB, serverURL string) *State {
 	return s
 }
 
+// EnableFileFields turns on experimental support for file-field properties
+// on resources. filesDir is the on-disk directory where uploaded files are
+// stored. This method is library-only; it is not exposed via CLI flags.
+// Calling it multiple times is safe — later calls overwrite the directory.
+func (s *State) EnableFileFields(filesDir string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.fileFieldsEnabled = true
+	s.filesDir = filesDir
+}
+
+// FileFieldsEnabled reports whether file-field support is turned on.
+func (s *State) FileFieldsEnabled() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.fileFieldsEnabled
+}
+
 func (s *State) Handler() http.Handler {
 	return &muxWrapper{state: s}
 }
@@ -150,6 +175,20 @@ func (s *State) GetAPI() *api.API {
 func (s *State) AddResource(def meta.ResourceDefinition) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// Reject file-field schemas when support is not enabled. We check
+	// both explicitly-declared FileFields and any properties that have
+	// type "binary" in the schema.
+	if !s.fileFieldsEnabled {
+		if len(def.FileFields) > 0 {
+			return fmt.Errorf("resource %q declares file fields but file-field support is not enabled; call State.EnableFileFields(dir) or set ServerOptions.EnableFileFields", def.Singular)
+		}
+		for name, prop := range def.Schema.Properties {
+			if prop.Type == "binary" {
+				return fmt.Errorf("resource %q property %q has type %q but file-field support is not enabled", def.Singular, name, prop.Type)
+			}
+		}
+	}
 
 	// Build the schema with standard AEP fields added (copy properties to avoid mutating the original).
 	schema := def.Schema
@@ -230,6 +269,13 @@ func (s *State) AddResource(def meta.ResourceDefinition) error {
 	if len(def.Enums) > 0 {
 		s.resourceEnums[def.Singular] = def.Enums
 	}
+	if len(def.FileFields) > 0 {
+		set := make(map[string]bool, len(def.FileFields))
+		for _, f := range def.FileFields {
+			set[f] = true
+		}
+		s.resourceFileFields[def.Singular] = set
+	}
 
 	// Apply any custom methods that were registered before this resource existed.
 	var remaining []customMethodRegistration
@@ -244,8 +290,51 @@ func (s *State) AddResource(def meta.ResourceDefinition) error {
 	}
 	s.pendingCustomMethods = remaining
 
+	// Auto-register the :download custom method for resources with file fields.
+	if len(def.FileFields) > 0 {
+		for _, reg := range s.customMethods {
+			if reg.resourceSingular == def.Singular && reg.methodName == "download" {
+				return fmt.Errorf("custom method %q is reserved for resources with file fields", "download")
+			}
+		}
+		cfg := CustomMethodConfig{
+			Method:         "POST",
+			RequestSchema:  downloadRequestSchema(),
+			ResponseSchema: downloadResponseSchema(),
+			Handler:        resource.MakeDownloadHandler(s.DB, r, s.resourceFileFields[def.Singular], s.filesDir),
+		}
+		if err := s.addCustomMethodLocked(def.Singular, "download", cfg); err != nil {
+			return fmt.Errorf("registering download method: %w", err)
+		}
+	}
+
 	s.rebuildMux()
 	return nil
+}
+
+// downloadRequestSchema is the request body schema for the auto-registered
+// :download custom method on resources with file fields.
+func downloadRequestSchema() *openapi.Schema {
+	return &openapi.Schema{
+		Type:     "object",
+		Required: []string{"field"},
+		Properties: openapi.Properties{
+			"field": {
+				Type:        "string",
+				Description: "Name of the file field to download.",
+			},
+		},
+	}
+}
+
+// downloadResponseSchema describes the binary response of :download. The
+// handler streams the file bytes directly, bypassing JSON encoding.
+func downloadResponseSchema() *openapi.Schema {
+	return &openapi.Schema{
+		Type:        "string",
+		Format:      "binary",
+		Description: "The raw file contents.",
+	}
 }
 
 func (s *State) RemoveResource(singular string) error {
@@ -287,6 +376,7 @@ func (s *State) RemoveResource(singular string) error {
 	delete(s.resourceDescriptions, singular)
 	delete(s.resourceExamples, singular)
 	delete(s.resourceEnums, singular)
+	delete(s.resourceFileFields, singular)
 	s.rebuildMux()
 	return nil
 }
@@ -403,7 +493,11 @@ func (s *State) rebuildMux() {
 				}
 			}
 		}
-		resource.RegisterRoutes(mux, s.DB, r, cmHandlers, s.resourceEnums[r.Singular])
+		resource.RegisterRoutes(mux, s.DB, r, cmHandlers, s.resourceEnums[r.Singular], resource.FileFieldConfig{
+			Fields:    s.resourceFileFields[r.Singular],
+			FilesDir:  s.filesDir,
+			ServerURL: s.ServerURL,
+		})
 	}
 	s.mux = mux
 }
@@ -438,6 +532,10 @@ func (s *State) serveOpenAPI(w http.ResponseWriter, r *http.Request) {
 	for k, v := range s.singletonResources {
 		singletons[k] = v
 	}
+	fileFields := make(map[string]map[string]bool, len(s.resourceFileFields))
+	for k, v := range s.resourceFileFields {
+		fileFields[k] = v
+	}
 	s.mu.RUnlock()
 
 	jsonBytes, err := a.ConvertToOpenAPIBytes()
@@ -447,6 +545,12 @@ func (s *State) serveOpenAPI(w http.ResponseWriter, r *http.Request) {
 	}
 
 	jsonBytes, err = enrichOpenAPI(jsonBytes, a.Name, descriptions, examples)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	jsonBytes, err = injectFileFieldExtensions(jsonBytes, fileFields)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -516,7 +620,65 @@ func (s *State) ExportUserResourcesOpenAPI() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	fileFields := make(map[string]map[string]bool, len(s.resourceFileFields))
+	for k, v := range s.resourceFileFields {
+		if builtinResources[k] {
+			continue
+		}
+		fileFields[k] = v
+	}
+	jsonBytes, err = injectFileFieldExtensions(jsonBytes, fileFields)
+	if err != nil {
+		return nil, err
+	}
 	return fixSingletonOpenAPI(jsonBytes, filtered, singletons)
+}
+
+// injectFileFieldExtensions re-emits the x-aepbase-file-field: true extension
+// on file-field properties in the generated OpenAPI spec. aep-lib-go's
+// openapi.Schema does not preserve unknown extensions during round-trip, so
+// we re-add them at serialization time from the State's tracked file fields.
+// It also switches the request-body content type for create/update/apply on
+// resources with file fields to multipart/form-data.
+func injectFileFieldExtensions(data []byte, fileFields map[string]map[string]bool) ([]byte, error) {
+	if len(fileFields) == 0 {
+		return data, nil
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return nil, err
+	}
+	components, _ := doc["components"].(map[string]any)
+	schemas, _ := components["schemas"].(map[string]any)
+
+	for singular, fields := range fileFields {
+		// Component schema keys may be the singular name as-is or Capitalized.
+		schemaName := singular
+		if _, ok := schemas[schemaName]; !ok {
+			schemaName = capitalize(singular)
+		}
+		schema, ok := schemas[schemaName].(map[string]any)
+		if !ok {
+			continue
+		}
+		props, ok := schema["properties"].(map[string]any)
+		if !ok {
+			continue
+		}
+		for fieldName := range fields {
+			prop, ok := props[fieldName].(map[string]any)
+			if !ok {
+				continue
+			}
+			prop["x-aepbase-file-field"] = true
+			// Ensure the type reflects binary contents in responses as well.
+			if _, has := prop["type"]; !has {
+				prop["type"] = "string"
+				prop["format"] = "binary"
+			}
+		}
+	}
+	return json.MarshalIndent(doc, "", "  ")
 }
 
 // errorResponseSchema returns a reusable error response schema.

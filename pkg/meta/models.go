@@ -17,6 +17,11 @@ type ResourceDefinition struct {
 	// values. Only string fields may be constrained. Absent fields are
 	// unconstrained.
 	Enums          map[string][]string `json:"enums,omitempty"`
+	// FileFields lists the names of properties that hold binary file contents
+	// (marked with x-aepbase-file-field: true and type: binary in the schema).
+	// File fields are an aepbase-specific, non-AEP extension and are only
+	// honored when file-field support is enabled on the server.
+	FileFields     []string            `json:"file_fields,omitempty"`
 	Parents        []string            `json:"parents,omitempty"`
 	Singleton      bool                `json:"singleton,omitempty"`
 	UserSettableId bool                `json:"user_settable_create,omitempty"`

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"strconv"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"github.com/aep-dev/aep-lib-go/pkg/openapi"
 
 	"github.com/rambleraptor/aepbase/pkg/db"
+	"github.com/rambleraptor/aepbase/pkg/filestore"
 )
 
 // CustomMethodHandler holds the handler and HTTP method for a custom method.
@@ -27,7 +29,7 @@ type CustomMethodHandler struct {
 // A nil or empty map means no enum constraints are applied.
 type FieldEnums = map[string][]string
 
-func RegisterRoutes(mux *http.ServeMux, d *sql.DB, r *api.Resource, customMethods map[string]CustomMethodHandler, enums FieldEnums) {
+func RegisterRoutes(mux *http.ServeMux, d *sql.DB, r *api.Resource, customMethods map[string]CustomMethodHandler, enums FieldEnums, files FileFieldConfig) {
 	elems := r.PatternElems()
 	collectionPath := "/" + strings.Join(elems[:len(elems)-1], "/")
 	resourcePath := "/" + strings.Join(elems, "/")
@@ -35,13 +37,13 @@ func RegisterRoutes(mux *http.ServeMux, d *sql.DB, r *api.Resource, customMethod
 	// The last pattern element is the resource ID param, e.g. "{book_id}".
 	idParam := strings.Trim(elems[len(elems)-1], "{}")
 
-	mux.HandleFunc("POST "+collectionPath, makeCreateHandler(d, r, enums))
-	mux.HandleFunc("GET "+collectionPath, makeListHandler(d, r))
-	mux.HandleFunc("GET "+resourcePath, makeGetOrCustomHandler(d, r, customMethods, idParam))
+	mux.HandleFunc("POST "+collectionPath, makeCreateHandler(d, r, enums, files))
+	mux.HandleFunc("GET "+collectionPath, makeListHandler(d, r, files))
+	mux.HandleFunc("GET "+resourcePath, makeGetOrCustomHandler(d, r, customMethods, idParam, files))
 	mux.HandleFunc("POST "+resourcePath, makePostCustomHandler(r, customMethods, idParam))
-	mux.HandleFunc("PATCH "+resourcePath, makeUpdateHandler(d, r, idParam, enums))
-	mux.HandleFunc("PUT "+resourcePath, makeApplyHandler(d, r, idParam, enums))
-	mux.HandleFunc("DELETE "+resourcePath, makeDeleteHandler(d, r, idParam))
+	mux.HandleFunc("PATCH "+resourcePath, makeUpdateHandler(d, r, idParam, enums, files))
+	mux.HandleFunc("PUT "+resourcePath, makeApplyHandler(d, r, idParam, enums, files))
+	mux.HandleFunc("DELETE "+resourcePath, makeDeleteHandler(d, r, idParam, files))
 }
 
 // RegisterSingletonRoutes registers GET and PATCH routes for a singleton resource.
@@ -55,8 +57,8 @@ func RegisterSingletonRoutes(mux *http.ServeMux, d *sql.DB, r *api.Resource, sin
 // makeGetOrCustomHandler returns a handler that serves GET for both regular
 // resources and GET-based custom methods. Go 1.22's {wildcard} matches
 // "id:method" as a single value, so we check for a colon to dispatch.
-func makeGetOrCustomHandler(d *sql.DB, r *api.Resource, customMethods map[string]CustomMethodHandler, idParam string) http.HandlerFunc {
-	getHandler := makeGetHandler(d, r, idParam)
+func makeGetOrCustomHandler(d *sql.DB, r *api.Resource, customMethods map[string]CustomMethodHandler, idParam string, files FileFieldConfig) http.HandlerFunc {
+	getHandler := makeGetHandler(d, r, idParam, files)
 	return func(w http.ResponseWriter, req *http.Request) {
 		rawID := req.PathValue(idParam)
 		if id, methodName, ok := splitCustomMethod(rawID); ok {
@@ -105,32 +107,23 @@ func splitCustomMethod(rawID string) (string, string, bool) {
 	return rawID[:idx], rawID[idx+1:], true
 }
 
-func makeCreateHandler(d *sql.DB, r *api.Resource, enums FieldEnums) http.HandlerFunc {
+func makeCreateHandler(d *sql.DB, r *api.Resource, enums FieldEnums, files FileFieldConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
-		body, err := io.ReadAll(req.Body)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, "invalid request body")
-			return
-		}
-
-		var fields map[string]any
-		if err := json.Unmarshal(body, &fields); err != nil {
-			writeError(w, http.StatusBadRequest, "invalid JSON")
-			return
-		}
-
-		// Get or generate ID.
+		// Get or generate ID (needed early to build the resource path for file storage).
 		id := req.URL.Query().Get("id")
 		if id == "" {
 			id = generateID()
 		}
-
-		// Extract parent IDs from path.
 		allParentIDs := extractParentIDs(req, r)
 		directParentIDs := extractDirectParentIDs(allParentIDs, r)
-
-		// Build the AEP path.
 		path := buildResourcePath(r, allParentIDs, id)
+
+		fields, uploaded, err := readCreateOrApplyBody(req, files, path)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
 		now := time.Now().UTC().Format(time.RFC3339)
 
 		// Remove standard fields from user data — they are managed by us.
@@ -142,14 +135,32 @@ func makeCreateHandler(d *sql.DB, r *api.Resource, enums FieldEnums) http.Handle
 		// Strip read-only fields — clients may not set them.
 		stripReadOnlyFields(r.Schema, fields)
 
-		// Validate required fields.
-		if err := validateRequired(r.Schema, fields); err != nil {
+		// Record uploaded file fields as on-disk sentinel values so they
+		// persist in the DB and the read path knows they exist.
+		for name := range uploaded {
+			fields[name] = fileFieldSentinel
+		}
+		// Reject attempts to set file-field values via JSON (they must come
+		// from multipart parts).
+		for name := range files.Fields {
+			if _, ok := uploaded[name]; ok {
+				continue
+			}
+			if v, set := fields[name]; set && v != nil {
+				writeError(w, http.StatusBadRequest, fmt.Sprintf("file field %q must be uploaded as a multipart file part, not a JSON value", name))
+				return
+			}
+			delete(fields, name)
+		}
+
+		// Validate required fields (file fields are considered present if uploaded).
+		if err := validateRequiredWithFiles(r.Schema, fields, files.Fields, uploaded); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 
-		// Validate field types.
-		if err := validateTypes(r.Schema, fields); err != nil {
+		// Validate field types (skipping file fields — sentinel strings are internal).
+		if err := validateTypesSkipping(r.Schema, fields, files.Fields); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -177,11 +188,11 @@ func makeCreateHandler(d *sql.DB, r *api.Resource, enums FieldEnums) http.Handle
 			return
 		}
 
-		writeResourceJSON(w, http.StatusOK, stored, r.Schema)
+		writeResourceJSONWithFiles(w, http.StatusOK, stored, r.Schema, files)
 	}
 }
 
-func makeGetHandler(d *sql.DB, r *api.Resource, idParam string) http.HandlerFunc {
+func makeGetHandler(d *sql.DB, r *api.Resource, idParam string, files FileFieldConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
 		parentIDs := extractParentIDs(req, r)
 		id := req.PathValue(idParam)
@@ -197,11 +208,11 @@ func makeGetHandler(d *sql.DB, r *api.Resource, idParam string) http.HandlerFunc
 			return
 		}
 
-		writeResourceJSON(w, http.StatusOK, stored, r.Schema)
+		writeResourceJSONWithFiles(w, http.StatusOK, stored, r.Schema, files)
 	}
 }
 
-func makeListHandler(d *sql.DB, r *api.Resource) http.HandlerFunc {
+func makeListHandler(d *sql.DB, r *api.Resource, files FileFieldConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
 		allParentIDs := extractParentIDs(req, r)
 		parentIDs := extractDirectParentIDs(allParentIDs, r)
@@ -245,7 +256,7 @@ func makeListHandler(d *sql.DB, r *api.Resource) http.HandlerFunc {
 
 		items := make([]map[string]any, 0, len(results))
 		for _, sr := range results {
-			items = append(items, storedToMap(&sr, r.Schema))
+			items = append(items, storedToMapWithFiles(&sr, r.Schema, files))
 		}
 
 		resp := map[string]any{
@@ -260,7 +271,7 @@ func makeListHandler(d *sql.DB, r *api.Resource) http.HandlerFunc {
 	}
 }
 
-func makeUpdateHandler(d *sql.DB, r *api.Resource, idParam string, enums FieldEnums) http.HandlerFunc {
+func makeUpdateHandler(d *sql.DB, r *api.Resource, idParam string, enums FieldEnums, files FileFieldConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
 		parentIDs := extractParentIDs(req, r)
 		id := req.PathValue(idParam)
@@ -276,15 +287,9 @@ func makeUpdateHandler(d *sql.DB, r *api.Resource, idParam string, enums FieldEn
 			return
 		}
 
-		body, err := io.ReadAll(req.Body)
+		patch, uploaded, err := readCreateOrApplyBody(req, files, path)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "invalid request body")
-			return
-		}
-
-		var patch map[string]any
-		if err := json.Unmarshal(body, &patch); err != nil {
-			writeError(w, http.StatusBadRequest, "invalid JSON")
+			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 
@@ -297,8 +302,23 @@ func makeUpdateHandler(d *sql.DB, r *api.Resource, idParam string, enums FieldEn
 		// Strip read-only fields — clients may not update them.
 		stripReadOnlyFields(r.Schema, patch)
 
-		// Validate field types on the patch values.
-		if err := validateTypes(r.Schema, patch); err != nil {
+		// Record uploaded files as sentinels; reject JSON values for file fields.
+		for name := range uploaded {
+			patch[name] = fileFieldSentinel
+		}
+		for name := range files.Fields {
+			if _, ok := uploaded[name]; ok {
+				continue
+			}
+			if v, set := patch[name]; set && v != nil {
+				writeError(w, http.StatusBadRequest, fmt.Sprintf("file field %q must be uploaded as a multipart file part, not a JSON value", name))
+				return
+			}
+			delete(patch, name)
+		}
+
+		// Validate field types on the patch values (skipping file fields).
+		if err := validateTypesSkipping(r.Schema, patch, files.Fields); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -322,29 +342,23 @@ func makeUpdateHandler(d *sql.DB, r *api.Resource, idParam string, enums FieldEn
 			return
 		}
 
-		writeResourceJSON(w, http.StatusOK, existing, r.Schema)
+		writeResourceJSONWithFiles(w, http.StatusOK, existing, r.Schema, files)
 	}
 }
 
 // makeApplyHandler returns a handler for the Apply (PUT) method.
 // Apply is a declarative create-or-update: if the resource exists it replaces it fully,
 // if it doesn't exist it creates it.
-func makeApplyHandler(d *sql.DB, r *api.Resource, idParam string, enums FieldEnums) http.HandlerFunc {
+func makeApplyHandler(d *sql.DB, r *api.Resource, idParam string, enums FieldEnums, files FileFieldConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
 		allParentIDs := extractParentIDs(req, r)
 		directParentIDs := extractDirectParentIDs(allParentIDs, r)
 		id := req.PathValue(idParam)
 		path := buildResourcePath(r, allParentIDs, id)
 
-		body, err := io.ReadAll(req.Body)
+		fields, uploaded, err := readCreateOrApplyBody(req, files, path)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "invalid request body")
-			return
-		}
-
-		var fields map[string]any
-		if err := json.Unmarshal(body, &fields); err != nil {
-			writeError(w, http.StatusBadRequest, "invalid JSON")
+			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 
@@ -357,14 +371,28 @@ func makeApplyHandler(d *sql.DB, r *api.Resource, idParam string, enums FieldEnu
 		// Strip read-only fields.
 		stripReadOnlyFields(r.Schema, fields)
 
-		// Validate required fields.
-		if err := validateRequired(r.Schema, fields); err != nil {
+		for name := range uploaded {
+			fields[name] = fileFieldSentinel
+		}
+		for name := range files.Fields {
+			if _, ok := uploaded[name]; ok {
+				continue
+			}
+			if v, set := fields[name]; set && v != nil {
+				writeError(w, http.StatusBadRequest, fmt.Sprintf("file field %q must be uploaded as a multipart file part, not a JSON value", name))
+				return
+			}
+			delete(fields, name)
+		}
+
+		// Validate required fields (file fields considered present if uploaded).
+		if err := validateRequiredWithFiles(r.Schema, fields, files.Fields, uploaded); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 
 		// Validate field types.
-		if err := validateTypes(r.Schema, fields); err != nil {
+		if err := validateTypesSkipping(r.Schema, fields, files.Fields); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -393,7 +421,7 @@ func makeApplyHandler(d *sql.DB, r *api.Resource, idParam string, enums FieldEnu
 				writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to update resource: %v", err))
 				return
 			}
-			writeResourceJSON(w, http.StatusOK, existing, r.Schema)
+			writeResourceJSONWithFiles(w, http.StatusOK, existing, r.Schema, files)
 		} else {
 			// Create new resource.
 			stored := &StoredResource{
@@ -407,12 +435,12 @@ func makeApplyHandler(d *sql.DB, r *api.Resource, idParam string, enums FieldEnu
 				writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to create resource: %v", err))
 				return
 			}
-			writeResourceJSON(w, http.StatusOK, stored, r.Schema)
+			writeResourceJSONWithFiles(w, http.StatusOK, stored, r.Schema, files)
 		}
 	}
 }
 
-func makeDeleteHandler(d *sql.DB, r *api.Resource, idParam string) http.HandlerFunc {
+func makeDeleteHandler(d *sql.DB, r *api.Resource, idParam string, files FileFieldConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
 		parentIDs := extractParentIDs(req, r)
 		id := req.PathValue(idParam)
@@ -426,6 +454,11 @@ func makeDeleteHandler(d *sql.DB, r *api.Resource, idParam string) http.HandlerF
 		if !deleted {
 			writeError(w, http.StatusNotFound, fmt.Sprintf("resource %q not found", path))
 			return
+		}
+
+		// Best-effort cleanup of any stored file-field contents for this resource.
+		if files.HasFileFields() {
+			_ = filestore.DeleteAll(files.FilesDir, path)
 		}
 
 		w.WriteHeader(http.StatusNoContent)
@@ -673,10 +706,120 @@ func storedToMap(s *StoredResource, schema *openapi.Schema) map[string]any {
 	return m
 }
 
-func writeResourceJSON(w http.ResponseWriter, status int, s *StoredResource, schema *openapi.Schema) {
+// storedToMapWithFiles converts a stored resource to a response map, rewriting
+// any file-field values into absolute download URLs. If the on-disk file is
+// missing, the field is omitted from the output.
+func storedToMapWithFiles(s *StoredResource, schema *openapi.Schema, files FileFieldConfig) map[string]any {
+	m := storedToMap(s, schema)
+	if !files.HasFileFields() {
+		return m
+	}
+	for name := range files.Fields {
+		if !filestore.Exists(files.FilesDir, s.Path, name) {
+			delete(m, name)
+			continue
+		}
+		m[name] = fileFieldDownloadURL(files.ServerURL, s.Path, name)
+	}
+	return m
+}
+
+func writeResourceJSONWithFiles(w http.ResponseWriter, status int, s *StoredResource, schema *openapi.Schema, files FileFieldConfig) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(storedToMap(s, schema))
+	json.NewEncoder(w).Encode(storedToMapWithFiles(s, schema, files))
+}
+
+// fileFieldSentinel is the value stored in the DB column for a file field
+// to indicate that content has been uploaded. The real bytes live on disk.
+const fileFieldSentinel = "1"
+
+// fileFieldDownloadURL builds the URL clients can POST to download a file.
+func fileFieldDownloadURL(serverURL, resourcePath, field string) string {
+	return fmt.Sprintf("%s/%s:download?field=%s", strings.TrimRight(serverURL, "/"), resourcePath, field)
+}
+
+// readCreateOrApplyBody parses either a JSON body or a multipart/form-data
+// body into a fields map. For multipart requests it additionally streams any
+// file parts matching declared file fields onto disk and returns the set of
+// fields that were uploaded.
+//
+// Multipart layout:
+//   - A part named "resource" (or "body") contains a JSON object with the
+//     non-file fields. It is optional — if omitted, the fields map is empty.
+//   - Any remaining file parts whose form name matches a declared file field
+//     are streamed to disk.
+func readCreateOrApplyBody(req *http.Request, files FileFieldConfig, resourcePath string) (map[string]any, map[string]bool, error) {
+	ct := req.Header.Get("Content-Type")
+	mediaType, _, _ := mime.ParseMediaType(ct)
+
+	if mediaType != "multipart/form-data" {
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			return nil, nil, fmt.Errorf("invalid request body")
+		}
+		fields := make(map[string]any)
+		if len(body) > 0 {
+			if err := json.Unmarshal(body, &fields); err != nil {
+				return nil, nil, fmt.Errorf("invalid JSON")
+			}
+		}
+		return fields, nil, nil
+	}
+
+	if !files.HasFileFields() {
+		return nil, nil, fmt.Errorf("resource does not accept multipart uploads")
+	}
+
+	mr, err := req.MultipartReader()
+	if err != nil {
+		return nil, nil, fmt.Errorf("invalid multipart body: %v", err)
+	}
+
+	fields := make(map[string]any)
+	uploaded := make(map[string]bool)
+	for {
+		part, err := mr.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, nil, fmt.Errorf("reading multipart: %v", err)
+		}
+		name := part.FormName()
+		filename := part.FileName()
+
+		// The JSON body of non-file fields arrives as a form field named
+		// "resource" or "body".
+		if filename == "" && (name == "resource" || name == "body") {
+			data, err := io.ReadAll(part)
+			part.Close()
+			if err != nil {
+				return nil, nil, fmt.Errorf("reading JSON part: %v", err)
+			}
+			if len(data) > 0 {
+				if err := json.Unmarshal(data, &fields); err != nil {
+					return nil, nil, fmt.Errorf("invalid JSON in %q part: %v", name, err)
+				}
+			}
+			continue
+		}
+
+		// File part matching a declared file field — stream to disk.
+		if files.Fields[name] {
+			if _, err := filestore.Write(files.FilesDir, resourcePath, name, part); err != nil {
+				part.Close()
+				return nil, nil, fmt.Errorf("storing file field %q: %v", name, err)
+			}
+			part.Close()
+			uploaded[name] = true
+			continue
+		}
+
+		// Unknown part — skip to avoid accidental writes.
+		part.Close()
+	}
+	return fields, uploaded, nil
 }
 
 func writeError(w http.ResponseWriter, status int, msg string) {
