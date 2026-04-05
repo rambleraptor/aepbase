@@ -438,6 +438,56 @@ func TestUpdateInstancePartial(t *testing.T) {
 	}
 }
 
+func TestEnumField(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+
+	// Register a resource that constrains the "status" field to an enum.
+	body := `{
+		"singular":"task",
+		"plural":"tasks",
+		"schema":{"properties":{"title":{"type":"string"},"status":{"type":"string"}}},
+		"enums":{"status":["pending","done"]}
+	}`
+	resp := doRequest(t, h, "POST", "/aep-resource-definitions?id=task", body)
+	if resp.StatusCode != 200 {
+		m := readJSON(t, resp)
+		t.Fatalf("register task: status %d: %v", resp.StatusCode, m)
+	}
+	m := readJSON(t, resp)
+	enums, ok := m["enums"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected enums in definition response, got %v", m["enums"])
+	}
+	if _, ok := enums["status"]; !ok {
+		t.Errorf("expected enums.status, got %v", enums)
+	}
+
+	// Valid enum value -> 200.
+	resp = doRequest(t, h, "POST", "/tasks?id=t1", `{"title":"write","status":"pending"}`)
+	if resp.StatusCode != 200 {
+		t.Fatalf("valid enum create: expected 200, got %d", resp.StatusCode)
+	}
+
+	// Invalid enum value -> 400.
+	resp = doRequest(t, h, "POST", "/tasks?id=t2", `{"title":"eat","status":"bogus"}`)
+	if resp.StatusCode != 400 {
+		t.Errorf("invalid enum create: expected 400, got %d", resp.StatusCode)
+	}
+
+	// PATCH rejects invalid enum value.
+	resp = doRequest(t, h, "PATCH", "/tasks/t1", `{"status":"bogus"}`)
+	if resp.StatusCode != 400 {
+		t.Errorf("invalid enum patch: expected 400, got %d", resp.StatusCode)
+	}
+
+	// PATCH accepts valid enum value.
+	resp = doRequest(t, h, "PATCH", "/tasks/t1", `{"status":"done"}`)
+	if resp.StatusCode != 200 {
+		t.Errorf("valid enum patch: expected 200, got %d", resp.StatusCode)
+	}
+}
+
 func TestDeleteInstance(t *testing.T) {
 	state := newTestState(t)
 	h := state.Handler()

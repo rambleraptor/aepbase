@@ -54,9 +54,10 @@ type State struct {
 	CORSAllowedOrigins    []string
 	customMethods         []customMethodRegistration
 	pendingCustomMethods  []customMethodRegistration
-	resourceDescriptions  map[string]string         // singular -> description
-	resourceExamples      map[string]map[string]any  // singular -> field -> example value
-	singletonResources    map[string]bool            // singular -> true for singleton resources
+	resourceDescriptions  map[string]string              // singular -> description
+	resourceExamples      map[string]map[string]any      // singular -> field -> example value
+	singletonResources    map[string]bool                // singular -> true for singleton resources
+	resourceEnums         map[string]map[string][]string // singular -> field name -> allowed enum values
 }
 
 // metaResourceSingular is the singular name for the built-in meta resource.
@@ -81,6 +82,7 @@ func NewState(d *sql.DB, serverURL string) *State {
 			},
 		},
 		singletonResources: make(map[string]bool),
+		resourceEnums:      make(map[string]map[string][]string),
 		resourceDescriptions: map[string]string{
 			"aep-resource-definition": "A resource definition. Create these to dynamically add new API endpoints.",
 		},
@@ -249,6 +251,9 @@ func (s *State) AddResource(def meta.ResourceDefinition) error {
 	if len(def.Examples) > 0 {
 		s.resourceExamples[def.Singular] = def.Examples
 	}
+	if len(def.Enums) > 0 {
+		s.resourceEnums[def.Singular] = def.Enums
+	}
 
 	// Apply any custom methods that were registered before this resource existed.
 	var remaining []customMethodRegistration
@@ -305,6 +310,7 @@ func (s *State) RemoveResource(singular string) error {
 	delete(s.singletonResources, singular)
 	delete(s.resourceDescriptions, singular)
 	delete(s.resourceExamples, singular)
+	delete(s.resourceEnums, singular)
 	s.rebuildMux()
 	return nil
 }
@@ -324,6 +330,12 @@ func (s *State) UpdateResourceSchema(def meta.ResourceDefinition, oldDef meta.Re
 	}
 	if len(def.Examples) > 0 {
 		s.resourceExamples[def.Singular] = def.Examples
+	}
+	// Enums are replaced wholesale on update (mirrors meta patch semantics).
+	if len(def.Enums) > 0 {
+		s.resourceEnums[def.Singular] = def.Enums
+	} else {
+		delete(s.resourceEnums, def.Singular)
 	}
 
 	oldProps := oldDef.Schema.Properties
@@ -399,7 +411,7 @@ func (s *State) rebuildMux() {
 		if s.singletonResources[r.Singular] {
 			// Singleton resources use different route patterns.
 			singletonPath := s.buildSingletonRoutePath(r)
-			resource.RegisterSingletonRoutes(mux, s.DB, r, singletonPath)
+			resource.RegisterSingletonRoutes(mux, s.DB, r, singletonPath, s.resourceEnums[r.Singular])
 			continue
 		}
 		// Collect custom method handlers for this resource.
@@ -412,7 +424,7 @@ func (s *State) rebuildMux() {
 				}
 			}
 		}
-		resource.RegisterRoutes(mux, s.DB, r, cmHandlers)
+		resource.RegisterRoutes(mux, s.DB, r, cmHandlers, s.resourceEnums[r.Singular])
 	}
 	s.mux = mux
 }
