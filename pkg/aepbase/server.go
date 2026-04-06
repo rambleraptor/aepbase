@@ -31,7 +31,12 @@ type ServerOptions struct {
 	// library-only — it is not registered as a CLI flag, so `main.go` cannot
 	// enable it. Off by default.
 	EnableFileFields bool
-	corsRaw          string
+	// EnableUsers turns on user authentication and authorization. When enabled,
+	// all API requests (except login) require a valid Bearer token. A default
+	// superuser is created on first run. This option is intentionally
+	// library-only — it is not registered as a CLI flag. Off by default.
+	EnableUsers bool
+	corsRaw     string
 }
 
 // CustomMethodOption defines a custom method to register on a resource.
@@ -105,6 +110,11 @@ func Run(opts ServerOptions) error {
 	state.CORSAllowedOrigins = opts.CORSAllowedOrigins
 	if opts.EnableFileFields {
 		state.EnableFileFields(filepath.Join(opts.DataDir, "files"))
+	}
+	if opts.EnableUsers {
+		if err := state.EnableUsers(); err != nil {
+			return fmt.Errorf("failed to enable users: %v", err)
+		}
 	}
 
 	// Load existing resource definitions from a previous run.
