@@ -19,6 +19,7 @@ import (
 	"github.com/rambleraptor/aepbase/pkg/meta"
 	"github.com/rambleraptor/aepbase/pkg/operation"
 	"github.com/rambleraptor/aepbase/pkg/resource"
+	"github.com/rambleraptor/aepbase/pkg/user"
 )
 
 // CustomMethodConfig defines a custom method to register on a resource.
@@ -64,6 +65,9 @@ type State struct {
 	fileFieldsEnabled  bool
 	filesDir           string
 	resourceFileFields map[string]map[string]bool // singular -> field name -> true
+	// User support (library-only, opt-in, off by default). When usersEnabled
+	// is true, all requests (except login) require a valid auth token.
+	usersEnabled bool
 }
 
 // metaResourceSingular is the singular name for the built-in meta resource.
@@ -162,6 +166,104 @@ func (s *State) FileFieldsEnabled() bool {
 	return s.fileFieldsEnabled
 }
 
+// EnableUsers turns on user authentication and authorization. When enabled,
+// all API requests (except login) require a valid Bearer token. If no users
+// exist in the database, a default superuser is created and its credentials
+// are logged to stdout. This method is library-only; it is not exposed via
+// CLI flags.
+func (s *State) EnableUsers() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if err := user.CreateUsersTable(s.DB); err != nil {
+		return fmt.Errorf("creating users table: %w", err)
+	}
+	if err := user.CreateTokensTable(s.DB); err != nil {
+		return fmt.Errorf("creating tokens table: %w", err)
+	}
+
+	// Bootstrap: if no users exist, create a default superuser.
+	count, err := user.CountUsers(s.DB)
+	if err != nil {
+		return fmt.Errorf("counting users: %w", err)
+	}
+	if count == 0 {
+		password, err := user.GenerateToken() // reuse random hex for password
+		if err != nil {
+			return fmt.Errorf("generating default password: %w", err)
+		}
+		password = password[:16] // trim to 16 chars for readability
+		if err := createBootstrapUser(s.DB, password); err != nil {
+			return fmt.Errorf("creating bootstrap superuser: %w", err)
+		}
+		fmt.Printf("=== DEFAULT SUPERUSER CREATED ===\n")
+		fmt.Printf("  Email:    admin@example.com\n")
+		fmt.Printf("  Password: %s\n", password)
+		fmt.Printf("  Change this password immediately.\n")
+		fmt.Printf("=================================\n")
+	}
+
+	// Register the user resource in the API for OpenAPI generation and
+	// so child resources can reference it as a parent.
+	userResource := &api.Resource{
+		Singular: user.UserResourceSingular,
+		Plural:   user.UserResourcePlural,
+		Children: []*api.Resource{},
+		Schema: &openapi.Schema{
+			Type: "object",
+			Properties: openapi.Properties{
+				"id":           {Type: "string", ReadOnly: true},
+				"path":         {Type: "string", ReadOnly: true},
+				"email":        {Type: "string"},
+				"display_name": {Type: "string"},
+				"type":         {Type: "string"},
+				"create_time":  {Type: "string", Format: "date-time", ReadOnly: true},
+				"update_time":  {Type: "string", Format: "date-time", ReadOnly: true},
+			},
+		},
+		Methods: api.Methods{
+			Create: &api.CreateMethod{},
+			Get:    &api.GetMethod{},
+			Update: &api.UpdateMethod{},
+			Delete: &api.DeleteMethod{},
+			List:   &api.ListMethod{},
+		},
+	}
+	userResource.API = s.API
+	s.API.Resources[user.UserResourceSingular] = userResource
+
+	s.usersEnabled = true
+	s.rebuildMux()
+	return nil
+}
+
+// UsersEnabled reports whether user support is turned on.
+func (s *State) UsersEnabled() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.usersEnabled
+}
+
+// createBootstrapUser inserts the initial superuser into the database.
+func createBootstrapUser(d *sql.DB, password string) error {
+	hash, err := user.HashPassword(password)
+	if err != nil {
+		return err
+	}
+	id := user.GenerateID()
+	now := time.Now().UTC().Format(time.RFC3339)
+	u := &user.User{
+		ID:          id,
+		Path:        "users/" + id,
+		Email:       "admin@example.com",
+		DisplayName: "Admin",
+		Type:        user.TypeSuperuser,
+		CreateTime:  now,
+		UpdateTime:  now,
+	}
+	return user.InsertUser(d, u, hash)
+}
+
 func (s *State) Handler() http.Handler {
 	return &muxWrapper{state: s}
 }
@@ -170,6 +272,15 @@ func (s *State) GetAPI() *api.API {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.API
+}
+
+// HasResource reports whether a resource with the given singular name exists
+// in the API (including built-in resources).
+func (s *State) HasResource(singular string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	_, ok := s.API.Resources[singular]
+	return ok
 }
 
 func (s *State) AddResource(def meta.ResourceDefinition) error {
@@ -472,15 +583,21 @@ func (s *State) rebuildMux() {
 		operation.RegisterRoutes(mux, s.DB)
 	}
 	mux.HandleFunc("GET /openapi.json", s.serveOpenAPI)
+	// Register user routes if users are enabled.
+	if s.usersEnabled {
+		user.RegisterRoutes(mux, s.DB)
+	}
 	for _, r := range s.API.Resources {
 		// Skip built-in resources — their routes are registered separately above.
-		if r.Singular == metaResourceSingular || r.Singular == operationResourceSingular {
+		if r.Singular == metaResourceSingular || r.Singular == operationResourceSingular || r.Singular == user.UserResourceSingular {
 			continue
 		}
 		if s.singletonResources[r.Singular] {
 			// Singleton resources use different route patterns.
 			singletonPath := s.buildSingletonRoutePath(r)
-			resource.RegisterSingletonRoutes(mux, s.DB, r, singletonPath, s.resourceEnums[r.Singular])
+			resource.RegisterSingletonRoutes(mux, s.DB, r, singletonPath, s.resourceEnums[r.Singular], resource.UserScopeConfig{
+				Enabled: s.usersEnabled && s.hasUserParent(r),
+			})
 			continue
 		}
 		// Collect custom method handlers for this resource.
@@ -497,9 +614,27 @@ func (s *State) rebuildMux() {
 			Fields:    s.resourceFileFields[r.Singular],
 			FilesDir:  s.filesDir,
 			ServerURL: s.ServerURL,
+		}, resource.UserScopeConfig{
+			Enabled: s.usersEnabled && s.hasUserParent(r),
 		})
 	}
 	s.mux = mux
+}
+
+// hasUserParent checks if the resource has "user" anywhere in its parent chain.
+func (s *State) hasUserParent(r *api.Resource) bool {
+	for _, p := range r.Parents {
+		if p == user.UserResourceSingular {
+			return true
+		}
+		// Check grandparents recursively.
+		if parent, ok := s.API.Resources[p]; ok {
+			if s.hasUserParent(parent) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // buildSingletonRoutePath constructs the HTTP route pattern for a singleton resource.
@@ -1114,9 +1249,18 @@ func (w *muxWrapper) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	w.state.mu.RLock()
 	mux := w.state.mux
 	allowedOrigins := w.state.CORSAllowedOrigins
+	usersEnabled := w.state.usersEnabled
+	db := w.state.DB
 	w.state.mu.RUnlock()
 
 	if handleCORS(rw, req, allowedOrigins) {
+		return
+	}
+
+	if usersEnabled {
+		// Wrap with auth middleware. Login is exempt.
+		authMw := user.Middleware(db)
+		authMw(mux).ServeHTTP(rw, req)
 		return
 	}
 

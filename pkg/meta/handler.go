@@ -20,6 +20,10 @@ type StateManager interface {
 	AddResource(def ResourceDefinition) error
 	RemoveResource(singular string) error
 	UpdateResourceSchema(def ResourceDefinition, oldDef ResourceDefinition) error
+	// HasResource reports whether a resource with the given singular name
+	// exists (including built-in resources like "user" that are not stored
+	// in the _aep_resource_definitions table).
+	HasResource(singular string) bool
 }
 
 func RegisterRoutes(mux *http.ServeMux, state StateManager) {
@@ -75,16 +79,18 @@ func makeCreateHandler(state StateManager) http.HandlerFunc {
 		def.CreateTime = now
 		def.UpdateTime = now
 
-		// Validate parents exist.
+		// Validate parents exist (check both dynamic definitions and built-in resources).
 		for _, parentSingular := range def.Parents {
-			existing, err := getDefinition(state.GetDB(), parentSingular)
-			if err != nil {
-				writeError(w, http.StatusInternalServerError, fmt.Sprintf("checking parent: %v", err))
-				return
-			}
-			if existing == nil {
-				writeError(w, http.StatusBadRequest, fmt.Sprintf("parent resource %q not found", parentSingular))
-				return
+			if !state.HasResource(parentSingular) {
+				existing, err := getDefinition(state.GetDB(), parentSingular)
+				if err != nil {
+					writeError(w, http.StatusInternalServerError, fmt.Sprintf("checking parent: %v", err))
+					return
+				}
+				if existing == nil {
+					writeError(w, http.StatusBadRequest, fmt.Sprintf("parent resource %q not found", parentSingular))
+					return
+				}
 			}
 		}
 

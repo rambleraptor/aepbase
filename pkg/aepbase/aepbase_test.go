@@ -2516,6 +2516,393 @@ func keysOf(m map[string]any) []string {
 	return keys
 }
 
+// --- User Support Tests ---
+
+func newTestStateWithUsers(t *testing.T) (*aepbase.State, http.Handler) {
+	t.Helper()
+	d, err := db.Init(":memory:")
+	if err != nil {
+		t.Fatalf("db.Init: %v", err)
+	}
+	t.Cleanup(func() { d.Close() })
+	state := aepbase.NewState(d, "http://localhost:8080")
+	if err := state.EnableUsers(); err != nil {
+		t.Fatalf("EnableUsers: %v", err)
+	}
+	return state, state.Handler()
+}
+
+func doAuthRequest(t *testing.T, handler http.Handler, method, path, body, token string) *http.Response {
+	t.Helper()
+	var bodyReader io.Reader
+	if body != "" {
+		bodyReader = strings.NewReader(body)
+	}
+	req := httptest.NewRequest(method, path, bodyReader)
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	return w.Result()
+}
+
+// loginAdmin logs in as admin@example.com with the given password and returns the token.
+func loginAdmin(t *testing.T, h http.Handler, password string) string {
+	t.Helper()
+	body := fmt.Sprintf(`{"email":"admin@example.com","password":"%s"}`, password)
+	resp := doAuthRequest(t, h, "POST", "/users/:login", body, "")
+	if resp.StatusCode != 200 {
+		m := readJSON(t, resp)
+		t.Fatalf("login failed: %d %v", resp.StatusCode, m)
+	}
+	m := readJSON(t, resp)
+	token, ok := m["token"].(string)
+	if !ok || token == "" {
+		t.Fatalf("login response missing token: %v", m)
+	}
+	return token
+}
+
+func TestUsersDisabledByDefault(t *testing.T) {
+	state := newTestState(t)
+	if state.UsersEnabled() {
+		t.Fatal("users should be disabled by default")
+	}
+	// Requests should work without auth.
+	h := state.Handler()
+	createResource(t, h, "", "widget", "widgets", nil, map[string]any{
+		"color": map[string]any{"type": "string"},
+	})
+	resp := doRequest(t, h, "GET", "/widgets", "")
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestUsersRequireAuth(t *testing.T) {
+	_, h := newTestStateWithUsers(t)
+	// Unauthenticated request should fail.
+	resp := doAuthRequest(t, h, "GET", "/aep-resource-definitions", "", "")
+	if resp.StatusCode != 401 {
+		t.Fatalf("expected 401, got %d", resp.StatusCode)
+	}
+}
+
+func TestLoginLogout(t *testing.T) {
+	_, h := newTestStateWithUsers(t)
+	// We need to discover the auto-generated password. Since it's logged to
+	// stdout, we capture it. Instead, let's test with a known user we create.
+	// But we need the admin password first. We'll test login failure instead,
+	// then create a user flow via the admin.
+
+	// Login with wrong password should fail.
+	resp := doAuthRequest(t, h, "POST", "/users/:login", `{"email":"admin@example.com","password":"wrong"}`, "")
+	if resp.StatusCode != 401 {
+		t.Fatalf("expected 401 for wrong password, got %d", resp.StatusCode)
+	}
+}
+
+// TestFullUserFlow captures stdout to get the bootstrap password, then exercises
+// the full CRUD and auth flow.
+func TestFullUserFlow(t *testing.T) {
+	d, err := db.Init(":memory:")
+	if err != nil {
+		t.Fatalf("db.Init: %v", err)
+	}
+	t.Cleanup(func() { d.Close() })
+	state := aepbase.NewState(d, "http://localhost:8080")
+
+	// Capture stdout to get the bootstrap password.
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	if err := state.EnableUsers(); err != nil {
+		os.Stdout = oldStdout
+		t.Fatalf("EnableUsers: %v", err)
+	}
+
+	w.Close()
+	os.Stdout = oldStdout
+	outBytes, _ := io.ReadAll(r)
+	output := string(outBytes)
+
+	// Parse the password from output.
+	var password string
+	for _, line := range strings.Split(output, "\n") {
+		if strings.Contains(line, "Password:") {
+			parts := strings.SplitN(line, ":", 2)
+			if len(parts) == 2 {
+				password = strings.TrimSpace(parts[1])
+			}
+		}
+	}
+	if password == "" {
+		t.Fatalf("could not find password in output: %s", output)
+	}
+
+	h := state.Handler()
+
+	// Login as admin.
+	adminToken := loginAdmin(t, h, password)
+
+	// List users as admin (superuser).
+	resp := doAuthRequest(t, h, "GET", "/users", "", adminToken)
+	if resp.StatusCode != 200 {
+		t.Fatalf("list users: expected 200, got %d", resp.StatusCode)
+	}
+	listResult := readJSON(t, resp)
+	results := listResult["results"].([]any)
+	if len(results) != 1 {
+		t.Fatalf("expected 1 user, got %d", len(results))
+	}
+
+	// Create a regular user.
+	resp = doAuthRequest(t, h, "POST", "/users", `{"email":"alice@example.com","password":"alice123","display_name":"Alice","type":"regular"}`, adminToken)
+	if resp.StatusCode != 200 {
+		m := readJSON(t, resp)
+		t.Fatalf("create user: expected 200, got %d: %v", resp.StatusCode, m)
+	}
+	aliceData := readJSON(t, resp)
+	aliceID := aliceData["id"].(string)
+
+	// Login as alice.
+	resp = doAuthRequest(t, h, "POST", "/users/:login", `{"email":"alice@example.com","password":"alice123"}`, "")
+	if resp.StatusCode != 200 {
+		t.Fatalf("alice login: expected 200, got %d", resp.StatusCode)
+	}
+	aliceLogin := readJSON(t, resp)
+	aliceToken := aliceLogin["token"].(string)
+
+	// Alice can get her own user.
+	resp = doAuthRequest(t, h, "GET", "/users/"+aliceID, "", aliceToken)
+	if resp.StatusCode != 200 {
+		t.Fatalf("alice get self: expected 200, got %d", resp.StatusCode)
+	}
+
+	// Alice cannot list users.
+	resp = doAuthRequest(t, h, "GET", "/users", "", aliceToken)
+	if resp.StatusCode != 403 {
+		t.Fatalf("alice list users: expected 403, got %d", resp.StatusCode)
+	}
+
+	// Alice cannot create users.
+	resp = doAuthRequest(t, h, "POST", "/users", `{"email":"bob@example.com","password":"bob123","type":"regular"}`, aliceToken)
+	if resp.StatusCode != 403 {
+		t.Fatalf("alice create user: expected 403, got %d", resp.StatusCode)
+	}
+
+	// Alice cannot get admin's user record.
+	adminUser := results[0].(map[string]any)
+	adminID := adminUser["id"].(string)
+	resp = doAuthRequest(t, h, "GET", "/users/"+adminID, "", aliceToken)
+	if resp.StatusCode != 403 {
+		t.Fatalf("alice get admin: expected 403, got %d", resp.StatusCode)
+	}
+
+	// Admin can delete alice.
+	resp = doAuthRequest(t, h, "DELETE", "/users/"+aliceID, "", adminToken)
+	if resp.StatusCode != 200 {
+		t.Fatalf("admin delete alice: expected 200, got %d", resp.StatusCode)
+	}
+
+	// Alice's token should now be invalid.
+	resp = doAuthRequest(t, h, "GET", "/users/"+aliceID, "", aliceToken)
+	if resp.StatusCode != 401 {
+		t.Fatalf("alice after delete: expected 401, got %d", resp.StatusCode)
+	}
+
+	// Logout admin.
+	resp = doAuthRequest(t, h, "POST", "/users/:logout", "", adminToken)
+	if resp.StatusCode != 200 {
+		t.Fatalf("admin logout: expected 200, got %d", resp.StatusCode)
+	}
+
+	// Admin token should now be invalid.
+	resp = doAuthRequest(t, h, "GET", "/users", "", adminToken)
+	if resp.StatusCode != 401 {
+		t.Fatalf("admin after logout: expected 401, got %d", resp.StatusCode)
+	}
+}
+
+func TestUserScopedChildResources(t *testing.T) {
+	d, err := db.Init(":memory:")
+	if err != nil {
+		t.Fatalf("db.Init: %v", err)
+	}
+	t.Cleanup(func() { d.Close() })
+	state := aepbase.NewState(d, "http://localhost:8080")
+
+	// Capture stdout for bootstrap password.
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+	if err := state.EnableUsers(); err != nil {
+		os.Stdout = oldStdout
+		t.Fatalf("EnableUsers: %v", err)
+	}
+	w.Close()
+	os.Stdout = oldStdout
+	outBytes, _ := io.ReadAll(r)
+	var password string
+	for _, line := range strings.Split(string(outBytes), "\n") {
+		if strings.Contains(line, "Password:") {
+			parts := strings.SplitN(line, ":", 2)
+			if len(parts) == 2 {
+				password = strings.TrimSpace(parts[1])
+			}
+		}
+	}
+
+	h := state.Handler()
+	adminToken := loginAdmin(t, h, password)
+
+	// Create a child resource under users: users/{user_id}/preferences
+	resp := doAuthRequest(t, h, "POST", "/aep-resource-definitions", `{
+		"singular": "preference",
+		"plural": "preferences",
+		"parents": ["user"],
+		"schema": {"properties": {"theme": {"type": "string"}}}
+	}`, adminToken)
+	if resp.StatusCode != 200 {
+		m := readJSON(t, resp)
+		t.Fatalf("create preference resource: %d: %v", resp.StatusCode, m)
+	}
+
+	// Create two regular users.
+	resp = doAuthRequest(t, h, "POST", "/users", `{"email":"user1@test.com","password":"pass1","type":"regular"}`, adminToken)
+	if resp.StatusCode != 200 {
+		m := readJSON(t, resp)
+		t.Fatalf("create user1: %d %v", resp.StatusCode, m)
+	}
+	user1 := readJSON(t, resp)
+	user1ID := user1["id"].(string)
+
+	resp = doAuthRequest(t, h, "POST", "/users", `{"email":"user2@test.com","password":"pass2","type":"regular"}`, adminToken)
+	if resp.StatusCode != 200 {
+		m := readJSON(t, resp)
+		t.Fatalf("create user2: %d %v", resp.StatusCode, m)
+	}
+	user2 := readJSON(t, resp)
+	user2ID := user2["id"].(string)
+
+	// Login as user1.
+	resp = doAuthRequest(t, h, "POST", "/users/:login", `{"email":"user1@test.com","password":"pass1"}`, "")
+	user1Login := readJSON(t, resp)
+	user1Token := user1Login["token"].(string)
+
+	// Login as user2.
+	resp = doAuthRequest(t, h, "POST", "/users/:login", `{"email":"user2@test.com","password":"pass2"}`, "")
+	user2Login := readJSON(t, resp)
+	user2Token := user2Login["token"].(string)
+
+	// User1 creates a preference.
+	resp = doAuthRequest(t, h, "POST", fmt.Sprintf("/users/%s/preferences", user1ID), `{"theme":"dark"}`, user1Token)
+	if resp.StatusCode != 200 {
+		m := readJSON(t, resp)
+		t.Fatalf("user1 create preference: %d %v", resp.StatusCode, m)
+	}
+
+	// User1 can list their own preferences.
+	resp = doAuthRequest(t, h, "GET", fmt.Sprintf("/users/%s/preferences", user1ID), "", user1Token)
+	if resp.StatusCode != 200 {
+		t.Fatalf("user1 list own preferences: expected 200, got %d", resp.StatusCode)
+	}
+
+	// User2 CANNOT list user1's preferences.
+	resp = doAuthRequest(t, h, "GET", fmt.Sprintf("/users/%s/preferences", user1ID), "", user2Token)
+	if resp.StatusCode != 403 {
+		t.Fatalf("user2 list user1 preferences: expected 403, got %d", resp.StatusCode)
+	}
+
+	// User2 can access their own (empty) preferences.
+	resp = doAuthRequest(t, h, "GET", fmt.Sprintf("/users/%s/preferences", user2ID), "", user2Token)
+	if resp.StatusCode != 200 {
+		t.Fatalf("user2 list own preferences: expected 200, got %d", resp.StatusCode)
+	}
+
+	// Admin (superuser) can list user1's preferences.
+	resp = doAuthRequest(t, h, "GET", fmt.Sprintf("/users/%s/preferences", user1ID), "", adminToken)
+	if resp.StatusCode != 200 {
+		t.Fatalf("admin list user1 preferences: expected 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestUserUpdateSelf(t *testing.T) {
+	d, err := db.Init(":memory:")
+	if err != nil {
+		t.Fatalf("db.Init: %v", err)
+	}
+	t.Cleanup(func() { d.Close() })
+	state := aepbase.NewState(d, "http://localhost:8080")
+
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+	if err := state.EnableUsers(); err != nil {
+		os.Stdout = oldStdout
+		t.Fatalf("EnableUsers: %v", err)
+	}
+	w.Close()
+	os.Stdout = oldStdout
+	outBytes, _ := io.ReadAll(r)
+	var password string
+	for _, line := range strings.Split(string(outBytes), "\n") {
+		if strings.Contains(line, "Password:") {
+			parts := strings.SplitN(line, ":", 2)
+			if len(parts) == 2 {
+				password = strings.TrimSpace(parts[1])
+			}
+		}
+	}
+
+	h := state.Handler()
+	adminToken := loginAdmin(t, h, password)
+
+	// Create a regular user.
+	resp := doAuthRequest(t, h, "POST", "/users", `{"email":"bob@test.com","password":"bobpass","type":"regular"}`, adminToken)
+	bob := readJSON(t, resp)
+	bobID := bob["id"].(string)
+
+	// Login as bob.
+	resp = doAuthRequest(t, h, "POST", "/users/:login", `{"email":"bob@test.com","password":"bobpass"}`, "")
+	bobLogin := readJSON(t, resp)
+	bobToken := bobLogin["token"].(string)
+
+	// Bob can update his own display name.
+	resp = doAuthRequest(t, h, "PATCH", "/users/"+bobID, `{"display_name":"Bob Updated"}`, bobToken)
+	if resp.StatusCode != 200 {
+		m := readJSON(t, resp)
+		t.Fatalf("bob update self: expected 200, got %d %v", resp.StatusCode, m)
+	}
+	updated := readJSON(t, resp)
+	if updated["display_name"] != "Bob Updated" {
+		t.Fatalf("expected display_name 'Bob Updated', got %v", updated["display_name"])
+	}
+
+	// Bob cannot change his own type to superuser.
+	resp = doAuthRequest(t, h, "PATCH", "/users/"+bobID, `{"type":"superuser"}`, bobToken)
+	if resp.StatusCode != 403 {
+		t.Fatalf("bob promote self: expected 403, got %d", resp.StatusCode)
+	}
+
+	// Bob can change his own password.
+	resp = doAuthRequest(t, h, "PATCH", "/users/"+bobID, `{"password":"newpass"}`, bobToken)
+	if resp.StatusCode != 200 {
+		t.Fatalf("bob change password: expected 200, got %d", resp.StatusCode)
+	}
+
+	// Old login should still work (existing token), but new login uses new password.
+	resp = doAuthRequest(t, h, "POST", "/users/:login", `{"email":"bob@test.com","password":"newpass"}`, "")
+	if resp.StatusCode != 200 {
+		t.Fatalf("bob login with new password: expected 200, got %d", resp.StatusCode)
+	}
+}
+
 // Ensure unused imports are consumed.
 var _ = (*sql.DB)(nil)
 var _ = meta.ResourceDefinition{}

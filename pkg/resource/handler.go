@@ -17,6 +17,7 @@ import (
 
 	"github.com/rambleraptor/aepbase/pkg/db"
 	"github.com/rambleraptor/aepbase/pkg/filestore"
+	"github.com/rambleraptor/aepbase/pkg/user"
 )
 
 // CustomMethodHandler holds the handler and HTTP method for a custom method.
@@ -29,7 +30,36 @@ type CustomMethodHandler struct {
 // A nil or empty map means no enum constraints are applied.
 type FieldEnums = map[string][]string
 
-func RegisterRoutes(mux *http.ServeMux, d *sql.DB, r *api.Resource, customMethods map[string]CustomMethodHandler, enums FieldEnums, files FileFieldConfig) {
+// UserScopeConfig controls user-based access scoping for resources that are
+// children of the user resource. When Enabled is true, non-superuser requests
+// are restricted to resources belonging to the authenticated user.
+type UserScopeConfig struct {
+	Enabled bool
+}
+
+// checkUserScope verifies that the authenticated user is allowed to access
+// the resource at the given user_id. Superusers are always allowed.
+// Returns true if the request should be rejected (error already written).
+func checkUserScope(w http.ResponseWriter, req *http.Request, scope UserScopeConfig) bool {
+	if !scope.Enabled {
+		return false
+	}
+	caller := user.FromContext(req.Context())
+	if caller == nil {
+		return false // no auth context means users aren't enabled
+	}
+	if caller.Type == user.TypeSuperuser {
+		return false
+	}
+	userID := req.PathValue("user_id")
+	if userID != "" && userID != caller.ID {
+		writeError(w, http.StatusForbidden, "you do not have access to this resource")
+		return true
+	}
+	return false
+}
+
+func RegisterRoutes(mux *http.ServeMux, d *sql.DB, r *api.Resource, customMethods map[string]CustomMethodHandler, enums FieldEnums, files FileFieldConfig, scope UserScopeConfig) {
 	elems := r.PatternElems()
 	collectionPath := "/" + strings.Join(elems[:len(elems)-1], "/")
 	resourcePath := "/" + strings.Join(elems, "/")
@@ -37,28 +67,28 @@ func RegisterRoutes(mux *http.ServeMux, d *sql.DB, r *api.Resource, customMethod
 	// The last pattern element is the resource ID param, e.g. "{book_id}".
 	idParam := strings.Trim(elems[len(elems)-1], "{}")
 
-	mux.HandleFunc("POST "+collectionPath, makeCreateHandler(d, r, enums, files))
-	mux.HandleFunc("GET "+collectionPath, makeListHandler(d, r, files))
-	mux.HandleFunc("GET "+resourcePath, makeGetOrCustomHandler(d, r, customMethods, idParam, files))
+	mux.HandleFunc("POST "+collectionPath, makeCreateHandler(d, r, enums, files, scope))
+	mux.HandleFunc("GET "+collectionPath, makeListHandler(d, r, files, scope))
+	mux.HandleFunc("GET "+resourcePath, makeGetOrCustomHandler(d, r, customMethods, idParam, files, scope))
 	mux.HandleFunc("POST "+resourcePath, makePostCustomHandler(r, customMethods, idParam))
-	mux.HandleFunc("PATCH "+resourcePath, makeUpdateHandler(d, r, idParam, enums, files))
-	mux.HandleFunc("PUT "+resourcePath, makeApplyHandler(d, r, idParam, enums, files))
-	mux.HandleFunc("DELETE "+resourcePath, makeDeleteHandler(d, r, idParam, files))
+	mux.HandleFunc("PATCH "+resourcePath, makeUpdateHandler(d, r, idParam, enums, files, scope))
+	mux.HandleFunc("PUT "+resourcePath, makeApplyHandler(d, r, idParam, enums, files, scope))
+	mux.HandleFunc("DELETE "+resourcePath, makeDeleteHandler(d, r, idParam, files, scope))
 }
 
 // RegisterSingletonRoutes registers GET and PATCH routes for a singleton resource.
 // Singleton resources have a fixed path like /parents/{parent_id}/singular
 // with no collection endpoints and no resource ID in the path.
-func RegisterSingletonRoutes(mux *http.ServeMux, d *sql.DB, r *api.Resource, singletonPath string, enums FieldEnums) {
-	mux.HandleFunc("GET "+singletonPath, makeSingletonGetHandler(d, r))
-	mux.HandleFunc("PATCH "+singletonPath, makeSingletonUpdateHandler(d, r, enums))
+func RegisterSingletonRoutes(mux *http.ServeMux, d *sql.DB, r *api.Resource, singletonPath string, enums FieldEnums, scope UserScopeConfig) {
+	mux.HandleFunc("GET "+singletonPath, makeSingletonGetHandler(d, r, scope))
+	mux.HandleFunc("PATCH "+singletonPath, makeSingletonUpdateHandler(d, r, enums, scope))
 }
 
 // makeGetOrCustomHandler returns a handler that serves GET for both regular
 // resources and GET-based custom methods. Go 1.22's {wildcard} matches
 // "id:method" as a single value, so we check for a colon to dispatch.
-func makeGetOrCustomHandler(d *sql.DB, r *api.Resource, customMethods map[string]CustomMethodHandler, idParam string, files FileFieldConfig) http.HandlerFunc {
-	getHandler := makeGetHandler(d, r, idParam, files)
+func makeGetOrCustomHandler(d *sql.DB, r *api.Resource, customMethods map[string]CustomMethodHandler, idParam string, files FileFieldConfig, scope UserScopeConfig) http.HandlerFunc {
+	getHandler := makeGetHandler(d, r, idParam, files, scope)
 	return func(w http.ResponseWriter, req *http.Request) {
 		rawID := req.PathValue(idParam)
 		if id, methodName, ok := splitCustomMethod(rawID); ok {
@@ -107,8 +137,11 @@ func splitCustomMethod(rawID string) (string, string, bool) {
 	return rawID[:idx], rawID[idx+1:], true
 }
 
-func makeCreateHandler(d *sql.DB, r *api.Resource, enums FieldEnums, files FileFieldConfig) http.HandlerFunc {
+func makeCreateHandler(d *sql.DB, r *api.Resource, enums FieldEnums, files FileFieldConfig, scope UserScopeConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
+		if checkUserScope(w, req, scope) {
+			return
+		}
 		// Get or generate ID (needed early to build the resource path for file storage).
 		id := req.URL.Query().Get("id")
 		if id == "" {
@@ -192,8 +225,11 @@ func makeCreateHandler(d *sql.DB, r *api.Resource, enums FieldEnums, files FileF
 	}
 }
 
-func makeGetHandler(d *sql.DB, r *api.Resource, idParam string, files FileFieldConfig) http.HandlerFunc {
+func makeGetHandler(d *sql.DB, r *api.Resource, idParam string, files FileFieldConfig, scope UserScopeConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
+		if checkUserScope(w, req, scope) {
+			return
+		}
 		parentIDs := extractParentIDs(req, r)
 		id := req.PathValue(idParam)
 		path := buildResourcePath(r, parentIDs, id)
@@ -212,8 +248,11 @@ func makeGetHandler(d *sql.DB, r *api.Resource, idParam string, files FileFieldC
 	}
 }
 
-func makeListHandler(d *sql.DB, r *api.Resource, files FileFieldConfig) http.HandlerFunc {
+func makeListHandler(d *sql.DB, r *api.Resource, files FileFieldConfig, scope UserScopeConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
+		if checkUserScope(w, req, scope) {
+			return
+		}
 		allParentIDs := extractParentIDs(req, r)
 		parentIDs := extractDirectParentIDs(allParentIDs, r)
 
@@ -271,8 +310,11 @@ func makeListHandler(d *sql.DB, r *api.Resource, files FileFieldConfig) http.Han
 	}
 }
 
-func makeUpdateHandler(d *sql.DB, r *api.Resource, idParam string, enums FieldEnums, files FileFieldConfig) http.HandlerFunc {
+func makeUpdateHandler(d *sql.DB, r *api.Resource, idParam string, enums FieldEnums, files FileFieldConfig, scope UserScopeConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
+		if checkUserScope(w, req, scope) {
+			return
+		}
 		parentIDs := extractParentIDs(req, r)
 		id := req.PathValue(idParam)
 		path := buildResourcePath(r, parentIDs, id)
@@ -349,8 +391,11 @@ func makeUpdateHandler(d *sql.DB, r *api.Resource, idParam string, enums FieldEn
 // makeApplyHandler returns a handler for the Apply (PUT) method.
 // Apply is a declarative create-or-update: if the resource exists it replaces it fully,
 // if it doesn't exist it creates it.
-func makeApplyHandler(d *sql.DB, r *api.Resource, idParam string, enums FieldEnums, files FileFieldConfig) http.HandlerFunc {
+func makeApplyHandler(d *sql.DB, r *api.Resource, idParam string, enums FieldEnums, files FileFieldConfig, scope UserScopeConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
+		if checkUserScope(w, req, scope) {
+			return
+		}
 		allParentIDs := extractParentIDs(req, r)
 		directParentIDs := extractDirectParentIDs(allParentIDs, r)
 		id := req.PathValue(idParam)
@@ -440,8 +485,11 @@ func makeApplyHandler(d *sql.DB, r *api.Resource, idParam string, enums FieldEnu
 	}
 }
 
-func makeDeleteHandler(d *sql.DB, r *api.Resource, idParam string, files FileFieldConfig) http.HandlerFunc {
+func makeDeleteHandler(d *sql.DB, r *api.Resource, idParam string, files FileFieldConfig, scope UserScopeConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
+		if checkUserScope(w, req, scope) {
+			return
+		}
 		parentIDs := extractParentIDs(req, r)
 		id := req.PathValue(idParam)
 		path := buildResourcePath(r, parentIDs, id)
@@ -467,8 +515,11 @@ func makeDeleteHandler(d *sql.DB, r *api.Resource, idParam string, files FileFie
 
 // makeSingletonGetHandler returns a handler for GET on a singleton resource.
 // If the singleton doesn't exist yet, it is implicitly created with default values.
-func makeSingletonGetHandler(d *sql.DB, r *api.Resource) http.HandlerFunc {
+func makeSingletonGetHandler(d *sql.DB, r *api.Resource, scope UserScopeConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
+		if checkUserScope(w, req, scope) {
+			return
+		}
 		parentIDs := extractSingletonParentIDs(req, r)
 		path := buildSingletonPath(r, parentIDs)
 
@@ -500,8 +551,11 @@ func makeSingletonGetHandler(d *sql.DB, r *api.Resource) http.HandlerFunc {
 
 // makeSingletonUpdateHandler returns a handler for PATCH on a singleton resource.
 // If the singleton doesn't exist yet, it is implicitly created with the patch values.
-func makeSingletonUpdateHandler(d *sql.DB, r *api.Resource, enums FieldEnums) http.HandlerFunc {
+func makeSingletonUpdateHandler(d *sql.DB, r *api.Resource, enums FieldEnums, scope UserScopeConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
+		if checkUserScope(w, req, scope) {
+			return
+		}
 		parentIDs := extractSingletonParentIDs(req, r)
 		path := buildSingletonPath(r, parentIDs)
 
