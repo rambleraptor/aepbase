@@ -1,10 +1,11 @@
 module github.com/rambleraptor/aepbase
 
-go 1.23.0
+go 1.25.0
 
 require (
 	github.com/aep-dev/aep-lib-go v0.0.0-20260218063107-bb4d0cbad616
 	github.com/google/cel-go v0.22.1
+	golang.org/x/crypto v0.49.0
 	google.golang.org/genproto/googleapis/api v0.0.0-20250303144028-a0af3efb3deb
 	modernc.org/sqlite v1.34.5
 )
@@ -20,10 +21,8 @@ require (
 	github.com/stoewer/go-strcase v1.2.0 // indirect
 	github.com/stretchr/testify v1.10.0 // indirect
 	golang.org/x/exp v0.0.0-20240823005443-9b4947da3948 // indirect
-	golang.org/x/mod v0.21.0 // indirect
-	golang.org/x/sys v0.31.0 // indirect
-	golang.org/x/text v0.23.0 // indirect
-	golang.org/x/tools v0.26.0 // indirect
+	golang.org/x/sys v0.42.0 // indirect
+	golang.org/x/text v0.35.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20250303144028-a0af3efb3deb // indirect
 	google.golang.org/protobuf v1.36.10 // indirect
 	modernc.org/libc v1.55.3 // indirect
