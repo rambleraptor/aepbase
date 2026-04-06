@@ -1,12 +1,16 @@
 package aepbase_test
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -2278,6 +2282,229 @@ func TestSingletonDefinitionPersistence(t *testing.T) {
 	m := readJSON(t, resp)
 	if m["singleton"] != true {
 		t.Errorf("expected singleton=true in definition, got %v", m["singleton"])
+	}
+}
+
+// --- File field tests ---
+
+func newTestStateWithFiles(t *testing.T) (*aepbase.State, string) {
+	t.Helper()
+	d, err := db.Init(":memory:")
+	if err != nil {
+		t.Fatalf("db.Init: %v", err)
+	}
+	t.Cleanup(func() { d.Close() })
+	filesDir := t.TempDir()
+	state := aepbase.NewState(d, "http://localhost:8080")
+	state.EnableFileFields(filesDir)
+	return state, filesDir
+}
+
+func registerFileFieldResource(t *testing.T, h http.Handler) {
+	t.Helper()
+	body := `{
+		"singular":"document",
+		"plural":"documents",
+		"schema":{"properties":{
+			"title":{"type":"string"},
+			"body":{"type":"binary","x-aepbase-file-field":true}
+		},"required":["title","body"]}
+	}`
+	resp := doRequest(t, h, "POST", "/aep-resource-definitions?id=document", body)
+	if resp.StatusCode != 200 {
+		m := readJSON(t, resp)
+		t.Fatalf("register document: status %d: %v", resp.StatusCode, m)
+	}
+}
+
+// doMultipartRequest posts a multipart/form-data create/update to handler h.
+// files is a map of form-field-name -> file content bytes. The non-file JSON
+// body is sent as a part named "resource".
+func doMultipartRequest(t *testing.T, h http.Handler, method, path, jsonBody string, files map[string][]byte) *http.Response {
+	t.Helper()
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	if jsonBody != "" {
+		if err := mw.WriteField("resource", jsonBody); err != nil {
+			t.Fatalf("writing resource part: %v", err)
+		}
+	}
+	for name, content := range files {
+		fw, err := mw.CreateFormFile(name, name)
+		if err != nil {
+			t.Fatalf("create form file: %v", err)
+		}
+		if _, err := fw.Write(content); err != nil {
+			t.Fatalf("write form file: %v", err)
+		}
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatalf("closing multipart: %v", err)
+	}
+	req := httptest.NewRequest(method, path, &buf)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	return w.Result()
+}
+
+func TestFileFieldDisabledRejectsSchema(t *testing.T) {
+	// Default state: file fields NOT enabled. Registering a resource whose
+	// schema marks a property as a file field must fail.
+	state := newTestState(t)
+	h := state.Handler()
+	body := `{
+		"singular":"document",
+		"plural":"documents",
+		"schema":{"properties":{
+			"body":{"type":"binary","x-aepbase-file-field":true}
+		}}
+	}`
+	resp := doRequest(t, h, "POST", "/aep-resource-definitions?id=document", body)
+	if resp.StatusCode == 200 {
+		t.Fatalf("expected failure when file fields disabled, got 200")
+	}
+}
+
+func TestFileFieldCreateAndDownload(t *testing.T) {
+	state, filesDir := newTestStateWithFiles(t)
+	h := state.Handler()
+	registerFileFieldResource(t, h)
+
+	content := []byte("hello aepbase file field")
+	resp := doMultipartRequest(t, h, "POST", "/documents?id=doc1",
+		`{"title":"my doc"}`,
+		map[string][]byte{"body": content},
+	)
+	if resp.StatusCode != 200 {
+		m := readJSON(t, resp)
+		t.Fatalf("create: status %d: %v", resp.StatusCode, m)
+	}
+	m := readJSON(t, resp)
+	if m["title"] != "my doc" {
+		t.Errorf("expected title=my doc, got %v", m["title"])
+	}
+	urlStr, ok := m["body"].(string)
+	if !ok {
+		t.Fatalf("expected body field to be a URL string, got %T: %v", m["body"], m["body"])
+	}
+	if !strings.Contains(urlStr, "/documents/doc1:download") {
+		t.Errorf("expected download URL, got %q", urlStr)
+	}
+
+	// File should exist on disk.
+	onDisk := filepath.Join(filesDir, "documents", "doc1", "body")
+	gotBytes, err := os.ReadFile(onDisk)
+	if err != nil {
+		t.Fatalf("reading file from disk: %v", err)
+	}
+	if !bytes.Equal(gotBytes, content) {
+		t.Errorf("disk bytes mismatch: got %q want %q", gotBytes, content)
+	}
+
+	// GET returns the URL.
+	resp = doRequest(t, h, "GET", "/documents/doc1", "")
+	if resp.StatusCode != 200 {
+		t.Fatalf("get: %d", resp.StatusCode)
+	}
+	m = readJSON(t, resp)
+	if _, ok := m["body"].(string); !ok {
+		t.Errorf("expected body URL on GET, got %v", m["body"])
+	}
+
+	// :download custom method returns the bytes.
+	resp = doRequest(t, h, "POST", "/documents/doc1:download", `{"field":"body"}`)
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("download: status %d: %s", resp.StatusCode, b)
+	}
+	got, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !bytes.Equal(got, content) {
+		t.Errorf("downloaded bytes mismatch: got %q want %q", got, content)
+	}
+}
+
+func TestFileFieldRequiredMissing(t *testing.T) {
+	state, _ := newTestStateWithFiles(t)
+	h := state.Handler()
+	registerFileFieldResource(t, h)
+
+	resp := doMultipartRequest(t, h, "POST", "/documents?id=doc1",
+		`{"title":"no file"}`,
+		nil,
+	)
+	if resp.StatusCode != 400 {
+		t.Fatalf("expected 400 when required file field missing, got %d", resp.StatusCode)
+	}
+}
+
+func TestFileFieldPatchOverwrites(t *testing.T) {
+	state, filesDir := newTestStateWithFiles(t)
+	h := state.Handler()
+	registerFileFieldResource(t, h)
+
+	first := []byte("first")
+	second := []byte("second version")
+	resp := doMultipartRequest(t, h, "POST", "/documents?id=doc1",
+		`{"title":"v1"}`, map[string][]byte{"body": first})
+	if resp.StatusCode != 200 {
+		t.Fatalf("create: %d", resp.StatusCode)
+	}
+	resp = doMultipartRequest(t, h, "PATCH", "/documents/doc1",
+		`{"title":"v2"}`, map[string][]byte{"body": second})
+	if resp.StatusCode != 200 {
+		m := readJSON(t, resp)
+		t.Fatalf("patch: %d: %v", resp.StatusCode, m)
+	}
+
+	onDisk := filepath.Join(filesDir, "documents", "doc1", "body")
+	got, err := os.ReadFile(onDisk)
+	if err != nil {
+		t.Fatalf("reading: %v", err)
+	}
+	if !bytes.Equal(got, second) {
+		t.Errorf("expected %q got %q", second, got)
+	}
+}
+
+func TestFileFieldDeleteCleansUp(t *testing.T) {
+	state, filesDir := newTestStateWithFiles(t)
+	h := state.Handler()
+	registerFileFieldResource(t, h)
+
+	resp := doMultipartRequest(t, h, "POST", "/documents?id=doc1",
+		`{"title":"doomed"}`, map[string][]byte{"body": []byte("bytes")})
+	if resp.StatusCode != 200 {
+		t.Fatalf("create: %d", resp.StatusCode)
+	}
+	onDisk := filepath.Join(filesDir, "documents", "doc1", "body")
+	if _, err := os.Stat(onDisk); err != nil {
+		t.Fatalf("file should exist: %v", err)
+	}
+
+	resp = doRequest(t, h, "DELETE", "/documents/doc1", "")
+	if resp.StatusCode != 204 {
+		t.Fatalf("delete: %d", resp.StatusCode)
+	}
+	if _, err := os.Stat(onDisk); !os.IsNotExist(err) {
+		t.Errorf("file should be cleaned up, stat err: %v", err)
+	}
+}
+
+func TestFileFieldOpenAPIExtension(t *testing.T) {
+	state, _ := newTestStateWithFiles(t)
+	h := state.Handler()
+	registerFileFieldResource(t, h)
+
+	resp := doRequest(t, h, "GET", "/openapi.json", "")
+	if resp.StatusCode != 200 {
+		t.Fatalf("openapi: %d", resp.StatusCode)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !strings.Contains(string(b), `"x-aepbase-file-field": true`) {
+		t.Errorf("openapi.json should contain x-aepbase-file-field extension; got:\n%s", string(b))
 	}
 }
 

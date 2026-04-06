@@ -44,6 +44,7 @@ func createMetaTables(db *sql.DB) error {
 			schema_json TEXT NOT NULL,
 			parents_json TEXT NOT NULL DEFAULT '[]',
 			enums_json TEXT NOT NULL DEFAULT '{}',
+			file_fields_json TEXT NOT NULL DEFAULT '[]',
 			create_time TEXT NOT NULL,
 			update_time TEXT NOT NULL
 		)
@@ -57,6 +58,7 @@ func createMetaTables(db *sql.DB) error {
 	db.Exec(`ALTER TABLE _aep_resource_definitions ADD COLUMN examples_json TEXT NOT NULL DEFAULT '{}'`)
 	db.Exec(`ALTER TABLE _aep_resource_definitions ADD COLUMN singleton INTEGER NOT NULL DEFAULT 0`)
 	db.Exec(`ALTER TABLE _aep_resource_definitions ADD COLUMN enums_json TEXT NOT NULL DEFAULT '{}'`)
+	db.Exec(`ALTER TABLE _aep_resource_definitions ADD COLUMN file_fields_json TEXT NOT NULL DEFAULT '[]'`)
 
 	// Operations table for long-running operations.
 	_, err = db.Exec(`
@@ -90,6 +92,10 @@ func SchemaTypeToSQLite(oasType, oasFormat string) string {
 	case "boolean":
 		return "INTEGER"
 	case "string":
+		return "TEXT"
+	case "binary":
+		// File fields are stored as text (a sentinel marker); the contents
+		// live on disk and are served via a custom download method.
 		return "TEXT"
 	case "object", "array":
 		return "TEXT"
