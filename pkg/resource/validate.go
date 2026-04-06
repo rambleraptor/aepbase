@@ -50,6 +50,51 @@ func validateTypes(schema *openapi.Schema, fields map[string]any) error {
 	return nil
 }
 
+// validateRequiredWithFiles is like validateRequired but treats file fields
+// as "present" if they were uploaded in the multipart request.
+func validateRequiredWithFiles(schema *openapi.Schema, fields map[string]any, fileFields map[string]bool, uploaded map[string]bool) error {
+	var missing []string
+	for _, name := range schema.Required {
+		if validationStandardFields[name] {
+			continue
+		}
+		if fileFields[name] {
+			if !uploaded[name] {
+				missing = append(missing, name)
+			}
+			continue
+		}
+		if _, ok := fields[name]; !ok {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("missing required fields: %s", strings.Join(missing, ", "))
+	}
+	return nil
+}
+
+// validateTypesSkipping runs validateTypes but skips any properties listed in
+// skip — used to avoid type-checking file-field sentinel values.
+func validateTypesSkipping(schema *openapi.Schema, fields map[string]any, skip map[string]bool) error {
+	for name, val := range fields {
+		if validationStandardFields[name] || skip[name] {
+			continue
+		}
+		prop, ok := schema.Properties[name]
+		if !ok {
+			continue
+		}
+		if val == nil {
+			continue
+		}
+		if err := checkType(name, val, prop.Type); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // validateEnums checks that each field value is one of the allowed enum values
 // declared for that field. Fields without an entry in enums are unconstrained.
 // Values of nil are allowed (to permit clearing a field).

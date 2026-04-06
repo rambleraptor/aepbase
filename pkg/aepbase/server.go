@@ -25,7 +25,13 @@ type ServerOptions struct {
 	CORSAllowedOrigins []string
 	CustomMethods      []CustomMethodOption
 	ExportResources    bool
-	corsRaw            string
+	// EnableFileFields turns on experimental support for file-field properties
+	// on resources (schema extension x-aepbase-file-field: true). File fields
+	// are NOT part of the AEP specification and this option is intentionally
+	// library-only — it is not registered as a CLI flag, so `main.go` cannot
+	// enable it. Off by default.
+	EnableFileFields bool
+	corsRaw          string
 }
 
 // CustomMethodOption defines a custom method to register on a resource.
@@ -97,6 +103,9 @@ func Run(opts ServerOptions) error {
 
 	state := NewState(d, serverURL)
 	state.CORSAllowedOrigins = opts.CORSAllowedOrigins
+	if opts.EnableFileFields {
+		state.EnableFileFields(filepath.Join(opts.DataDir, "files"))
+	}
 
 	// Load existing resource definitions from a previous run.
 	defs, err := meta.LoadAll(d)
