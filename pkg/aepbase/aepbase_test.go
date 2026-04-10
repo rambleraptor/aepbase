@@ -2492,6 +2492,72 @@ func TestFileFieldDeleteCleansUp(t *testing.T) {
 	}
 }
 
+// TestFileFieldDefinitionRoundTrip verifies that the meta GET handler echoes
+// x-aepbase-file-field: true inside the schema, matching what was sent on
+// POST. Without this, terraform's round-trip on
+// `aep_aep-resource-definition.schema` is lossy and the apply fails with
+// "Provider produced inconsistent result after apply".
+func TestFileFieldDefinitionRoundTrip(t *testing.T) {
+	state, _ := newTestStateWithFiles(t)
+	h := state.Handler()
+	registerFileFieldResource(t, h)
+
+	check := func(label string, body []byte) {
+		t.Helper()
+		var doc map[string]any
+		if err := json.Unmarshal(body, &doc); err != nil {
+			t.Fatalf("%s: invalid json: %v", label, err)
+		}
+		schema, ok := doc["schema"].(map[string]any)
+		if !ok {
+			t.Fatalf("%s: schema missing or not an object: %v", label, doc["schema"])
+		}
+		props, ok := schema["properties"].(map[string]any)
+		if !ok {
+			t.Fatalf("%s: properties missing: %v", label, schema)
+		}
+		bodyProp, ok := props["body"].(map[string]any)
+		if !ok {
+			t.Fatalf("%s: body property missing: %v", label, props)
+		}
+		if bodyProp["x-aepbase-file-field"] != true {
+			t.Errorf("%s: expected x-aepbase-file-field=true on body, got prop=%v", label, bodyProp)
+		}
+	}
+
+	// GET single
+	resp := doRequest(t, h, "GET", "/aep-resource-definitions/document", "")
+	if resp.StatusCode != 200 {
+		t.Fatalf("get def: %d", resp.StatusCode)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	check("GET", b)
+
+	// LIST
+	resp = doRequest(t, h, "GET", "/aep-resource-definitions", "")
+	if resp.StatusCode != 200 {
+		t.Fatalf("list defs: %d", resp.StatusCode)
+	}
+	b, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	var listDoc struct {
+		Results []json.RawMessage `json:"results"`
+	}
+	if err := json.Unmarshal(b, &listDoc); err != nil {
+		t.Fatalf("list parse: %v", err)
+	}
+	for _, raw := range listDoc.Results {
+		var probe struct {
+			Singular string `json:"singular"`
+		}
+		json.Unmarshal(raw, &probe)
+		if probe.Singular == "document" {
+			check("LIST", raw)
+		}
+	}
+}
+
 func TestFileFieldOpenAPIExtension(t *testing.T) {
 	state, _ := newTestStateWithFiles(t)
 	h := state.Handler()
