@@ -2492,6 +2492,43 @@ func TestFileFieldDeleteCleansUp(t *testing.T) {
 	}
 }
 
+// TestFileFieldResourceRecreate verifies that a resource with file fields
+// can be deleted and re-created. RemoveResource previously left the
+// auto-registered :download custom method behind, which then tripped
+// AddResource's "method already exists" guard on the second create.
+func TestFileFieldResourceRecreate(t *testing.T) {
+	state, _ := newTestStateWithFiles(t)
+	h := state.Handler()
+
+	create := func() *http.Response {
+		return doRequest(t, h, "POST", "/aep-resource-definitions?id=document", `{
+			"singular":"document",
+			"plural":"documents",
+			"schema":{"properties":{
+				"title":{"type":"string"},
+				"body":{"type":"binary","x-aepbase-file-field":true}
+			}}
+		}`)
+	}
+
+	resp := create()
+	if resp.StatusCode != 200 {
+		m := readJSON(t, resp)
+		t.Fatalf("first create: status %d: %v", resp.StatusCode, m)
+	}
+
+	resp = doRequest(t, h, "DELETE", "/aep-resource-definitions/document", "")
+	if resp.StatusCode != 204 {
+		t.Fatalf("delete: status %d", resp.StatusCode)
+	}
+
+	resp = create()
+	if resp.StatusCode != 200 {
+		m := readJSON(t, resp)
+		t.Fatalf("recreate: status %d: %v", resp.StatusCode, m)
+	}
+}
+
 // TestFileFieldDefinitionRoundTrip verifies that the meta GET handler echoes
 // x-aepbase-file-field: true inside the schema, matching what was sent on
 // POST. Without this, terraform's round-trip on
