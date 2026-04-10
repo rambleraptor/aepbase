@@ -515,6 +515,42 @@ func (s *State) UpdateResourceSchema(def meta.ResourceDefinition, oldDef meta.Re
 		delete(s.resourceEnums, def.Singular)
 	}
 
+	// File fields are replaced wholesale on update. Mirror AddResource's
+	// handling: reject when file-field support is disabled, rewrite the
+	// tracking set so openapi.json re-emits x-aepbase-file-field and
+	// rebuildMux picks up the new upload routes, and auto-register the
+	// :download custom method the first time file fields appear on a
+	// resource that didn't previously have any.
+	if len(def.FileFields) > 0 {
+		if !s.fileFieldsEnabled {
+			return fmt.Errorf("resource %q declares file fields but file-field support is not enabled; call State.EnableFileFields(dir) or set ServerOptions.EnableFileFields", def.Singular)
+		}
+		hadFileFields := len(s.resourceFileFields[def.Singular]) > 0
+		set := make(map[string]bool, len(def.FileFields))
+		for _, f := range def.FileFields {
+			set[f] = true
+		}
+		s.resourceFileFields[def.Singular] = set
+		if !hadFileFields {
+			for _, reg := range s.customMethods {
+				if reg.resourceSingular == def.Singular && reg.methodName == "download" {
+					return fmt.Errorf("custom method %q is reserved for resources with file fields", "download")
+				}
+			}
+			cfg := CustomMethodConfig{
+				Method:         "POST",
+				RequestSchema:  downloadRequestSchema(),
+				ResponseSchema: downloadResponseSchema(),
+				Handler:        resource.MakeDownloadHandler(s.DB, r, s.resourceFileFields[def.Singular], s.filesDir),
+			}
+			if err := s.addCustomMethodLocked(def.Singular, "download", cfg); err != nil {
+				return fmt.Errorf("registering download method: %w", err)
+			}
+		}
+	} else {
+		delete(s.resourceFileFields, def.Singular)
+	}
+
 	oldProps := oldDef.Schema.Properties
 	newProps := def.Schema.Properties
 
