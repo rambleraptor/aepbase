@@ -2508,6 +2508,81 @@ func TestFileFieldOpenAPIExtension(t *testing.T) {
 	}
 }
 
+// TestFileFieldOpenAPIExtensionAfterPatch verifies that adding a file field
+// to an existing resource via PATCH updates openapi.json. Previously
+// UpdateResourceSchema did not sync the in-memory file-field tracking, so the
+// extension was silently dropped.
+func TestFileFieldOpenAPIExtensionAfterPatch(t *testing.T) {
+	state, filesDir := newTestStateWithFiles(t)
+	h := state.Handler()
+
+	// Create the resource without any file field.
+	body := `{
+		"singular":"document",
+		"plural":"documents",
+		"schema":{"properties":{
+			"title":{"type":"string"}
+		}}
+	}`
+	resp := doRequest(t, h, "POST", "/aep-resource-definitions?id=document", body)
+	if resp.StatusCode != 200 {
+		m := readJSON(t, resp)
+		t.Fatalf("create def: status %d: %v", resp.StatusCode, m)
+	}
+
+	// PATCH the schema to add a file field.
+	patch := `{
+		"schema":{"properties":{
+			"title":{"type":"string"},
+			"body":{"type":"binary","x-aepbase-file-field":true}
+		}}
+	}`
+	resp = doRequest(t, h, "PATCH", "/aep-resource-definitions/document", patch)
+	if resp.StatusCode != 200 {
+		m := readJSON(t, resp)
+		t.Fatalf("patch def: status %d: %v", resp.StatusCode, m)
+	}
+
+	// openapi.json should now mark the body property with the extension.
+	resp = doRequest(t, h, "GET", "/openapi.json", "")
+	if resp.StatusCode != 200 {
+		t.Fatalf("openapi: %d", resp.StatusCode)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !strings.Contains(string(b), `"x-aepbase-file-field": true`) {
+		t.Errorf("openapi.json should contain x-aepbase-file-field extension after PATCH; got:\n%s", string(b))
+	}
+
+	// End-to-end: uploads should work on the newly file-fielded resource,
+	// and the auto-registered :download custom method should serve the bytes.
+	content := []byte("patched bytes")
+	resp = doMultipartRequest(t, h, "POST", "/documents?id=doc1",
+		`{"title":"hello"}`, map[string][]byte{"body": content})
+	if resp.StatusCode != 200 {
+		m := readJSON(t, resp)
+		t.Fatalf("create after patch: status %d: %v", resp.StatusCode, m)
+	}
+	onDisk := filepath.Join(filesDir, "documents", "doc1", "body")
+	gotBytes, err := os.ReadFile(onDisk)
+	if err != nil {
+		t.Fatalf("reading file from disk: %v", err)
+	}
+	if !bytes.Equal(gotBytes, content) {
+		t.Errorf("disk bytes mismatch: got %q want %q", gotBytes, content)
+	}
+	resp = doRequest(t, h, "POST", "/documents/doc1:download", `{"field":"body"}`)
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("download after patch: status %d: %s", resp.StatusCode, body)
+	}
+	got, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !bytes.Equal(got, content) {
+		t.Errorf("downloaded bytes mismatch: got %q want %q", got, content)
+	}
+}
+
 func keysOf(m map[string]any) []string {
 	keys := make([]string, 0, len(m))
 	for k := range m {
