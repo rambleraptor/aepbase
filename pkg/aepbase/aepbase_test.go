@@ -2592,6 +2592,16 @@ func TestUsersRequireAuth(t *testing.T) {
 	}
 }
 
+func TestOpenAPIExemptFromAuth(t *testing.T) {
+	_, h := newTestStateWithUsers(t)
+	// openapi.json should be accessible without authentication even when
+	// users are enabled.
+	resp := doAuthRequest(t, h, "GET", "/openapi.json", "", "")
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
 func TestLoginLogout(t *testing.T) {
 	_, h := newTestStateWithUsers(t)
 	// We need to discover the auto-generated password. Since it's logged to
