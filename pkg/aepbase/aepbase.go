@@ -488,6 +488,18 @@ func (s *State) RemoveResource(singular string) error {
 	delete(s.resourceExamples, singular)
 	delete(s.resourceEnums, singular)
 	delete(s.resourceFileFields, singular)
+
+	// Drop any custom methods registered against this singular. Without this,
+	// auto-registered methods like :download leak across delete/recreate
+	// cycles and AddResource then trips its "method already exists" guard.
+	filtered := s.customMethods[:0]
+	for _, reg := range s.customMethods {
+		if reg.resourceSingular != singular {
+			filtered = append(filtered, reg)
+		}
+	}
+	s.customMethods = filtered
+
 	s.rebuildMux()
 	return nil
 }
