@@ -1,6 +1,8 @@
 package meta
 
 import (
+	"encoding/json"
+
 	"github.com/aep-dev/aep-lib-go/pkg/openapi"
 )
 
@@ -27,4 +29,39 @@ type ResourceDefinition struct {
 	UserSettableId bool                `json:"user_settable_create,omitempty"`
 	CreateTime     string              `json:"create_time,omitempty"`
 	UpdateTime     string              `json:"update_time,omitempty"`
+}
+
+// MarshalJSON re-injects x-aepbase-file-field: true on each property listed
+// in FileFields. openapi.Schema drops unknown extensions on round-trip, so
+// without this the marker is missing from every meta-handler response.
+func (d ResourceDefinition) MarshalJSON() ([]byte, error) {
+	// Marshal via an alias type to avoid recursing into this method.
+	type alias ResourceDefinition
+	base, err := json.Marshal(alias(d))
+	if err != nil {
+		return nil, err
+	}
+	if len(d.FileFields) == 0 {
+		return base, nil
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(base, &doc); err != nil {
+		return nil, err
+	}
+	schema, ok := doc["schema"].(map[string]any)
+	if !ok {
+		return base, nil
+	}
+	props, ok := schema["properties"].(map[string]any)
+	if !ok {
+		return base, nil
+	}
+	for _, name := range d.FileFields {
+		prop, ok := props[name].(map[string]any)
+		if !ok {
+			continue
+		}
+		prop["x-aepbase-file-field"] = true
+	}
+	return json.Marshal(doc)
 }
