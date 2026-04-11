@@ -36,13 +36,45 @@ func Insert(d *sql.DB, plural string, r *StoredResource, parentIDs map[string]st
 	for _, propName := range schemaPropertyNames(schema) {
 		colNames = append(colNames, propName)
 		placeholders = append(placeholders, "?")
-		values = append(values, r.Fields[propName])
+		values = append(values, bindFieldValue(r.Fields[propName], schema, propName))
 	}
 
 	query := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)",
 		tableName, strings.Join(colNames, ", "), strings.Join(placeholders, ", "))
 	_, err := d.Exec(query, values...)
 	return err
+}
+
+// bindFieldValue prepares a field value for the SQL driver. The Go SQLite
+// driver doesn't know how to bind structured types (maps, slices), so we
+// JSON-marshal `object` and `array` fields to a string. coerceFieldValue
+// reverses this on read.
+func bindFieldValue(val any, schema *openapi.Schema, name string) any {
+	if val == nil {
+		return nil
+	}
+	prop, ok := schema.Properties[name]
+	if !ok {
+		return val
+	}
+	switch prop.Type {
+	case "object", "array":
+		// Already a primitive (string/[]byte) — pass through as-is.
+		switch v := val.(type) {
+		case string:
+			return v
+		case []byte:
+			return v
+		case json.RawMessage:
+			return string(v)
+		}
+		b, err := json.Marshal(val)
+		if err != nil {
+			return val
+		}
+		return string(b)
+	}
+	return val
 }
 
 func Get(d *sql.DB, plural string, path string, schema *openapi.Schema) (*StoredResource, error) {
@@ -234,7 +266,7 @@ func Update(d *sql.DB, plural string, path string, fields map[string]any, update
 	for _, propName := range schemaPropertyNames(schema) {
 		if v, ok := fields[propName]; ok {
 			setClauses = append(setClauses, fmt.Sprintf("%s = ?", propName))
-			args = append(args, v)
+			args = append(args, bindFieldValue(v, schema, propName))
 		}
 	}
 
