@@ -721,10 +721,17 @@ func extractParentIDs(req *http.Request, r *api.Resource) map[string]string {
 
 // extractDirectParentIDs returns only the direct parent IDs (not grandparents).
 // These correspond to the actual foreign key columns in the DB table.
+//
+// Path param names are derived from the parent singular by replacing hyphens
+// with underscores (Terraform plugin framework rejects hyphens in URL params),
+// so a parent like "credit-card" generates the param "credit_card_id". We
+// must apply the same transformation here, otherwise the lookup misses for
+// every kebab-case parent and the child resource is inserted with a NULL
+// FK column — triggering a NOT NULL constraint violation.
 func extractDirectParentIDs(allParentIDs map[string]string, r *api.Resource) map[string]string {
 	directIDs := make(map[string]string)
 	for _, parentSingular := range r.Parents {
-		paramName := parentSingular + "_id"
+		paramName := strings.ReplaceAll(parentSingular, "-", "_") + "_id"
 		if v, ok := allParentIDs[paramName]; ok {
 			directIDs[paramName] = v
 		}

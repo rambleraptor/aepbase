@@ -3091,6 +3091,88 @@ func TestUserUpdateSelf(t *testing.T) {
 	}
 }
 
+// TestKebabCaseParentFK creates a parent with a kebab-case singular
+// ("gift-card") and a child of that parent ("transaction"), then POSTs a
+// child via the nested URL. Before the fix in extractDirectParentIDs the
+// child insert hit a NOT NULL constraint because the parent FK column was
+// never populated — `extractDirectParentIDs` was building the param name
+// from the raw singular ("gift-card_id") while the URL pattern uses
+// underscores ("gift_card_id"), so the lookup missed and the FK column
+// went into the SQL with a nil value.
+func TestKebabCaseParentFK(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+
+	createResource(t, h, "gift-card", "gift-card", "gift-cards", nil, map[string]any{
+		"merchant": map[string]any{"type": "string"},
+	})
+	createResource(t, h, "transaction", "transaction", "transactions", []string{"gift-card"}, map[string]any{
+		"amount": map[string]any{"type": "number"},
+	})
+
+	resp := doRequest(t, h, "POST", "/gift-cards?id=gc1", `{"merchant":"x"}`)
+	if resp.StatusCode != 200 {
+		t.Fatalf("create gift-card: %d", resp.StatusCode)
+	}
+	resp = doRequest(t, h, "POST", "/gift-cards/gc1/transactions?id=tx1", `{"amount":5}`)
+	if resp.StatusCode != 200 {
+		m := readJSON(t, resp)
+		t.Fatalf("create transaction: status %d: %v", resp.StatusCode, m)
+	}
+
+	// And confirm the FK is queryable: listing the parent's children must
+	// return the just-created row.
+	resp = doRequest(t, h, "GET", "/gift-cards/gc1/transactions", "")
+	if resp.StatusCode != 200 {
+		t.Fatalf("list children: %d", resp.StatusCode)
+	}
+	m := readJSON(t, resp)
+	results, _ := m["results"].([]any)
+	if len(results) != 1 {
+		t.Fatalf("expected 1 child, got %d", len(results))
+	}
+}
+
+// TestObjectFieldJSONBinding verifies that an `object` schema property can
+// hold a real map without the SQL driver tripping on it. Before the fix in
+// store.go's bindFieldValue, Insert/Update passed map[string]any straight to
+// db.Exec, which the SQLite driver rejects with "unsupported type
+// map[string]interface{}, a map".
+func TestObjectFieldJSONBinding(t *testing.T) {
+	state := newTestState(t)
+	h := state.Handler()
+
+	createResource(t, h, "widget", "widget", "widgets", nil, map[string]any{
+		"name":     map[string]any{"type": "string"},
+		"settings": map[string]any{"type": "object"},
+	})
+
+	body := `{"name":"x","settings":{"theme":"dark","count":3}}`
+	resp := doRequest(t, h, "POST", "/widgets?id=w1", body)
+	if resp.StatusCode != 200 {
+		m := readJSON(t, resp)
+		t.Fatalf("create widget with object field: status %d: %v", resp.StatusCode, m)
+	}
+
+	// Round-trip: read back and verify the map survived.
+	resp = doRequest(t, h, "GET", "/widgets/w1", "")
+	if resp.StatusCode != 200 {
+		t.Fatalf("get widget: %d", resp.StatusCode)
+	}
+	got := readJSON(t, resp)
+	settings, ok := got["settings"]
+	if !ok {
+		t.Fatalf("settings missing from response: %v", got)
+	}
+	// Marshal whatever the server returned back to JSON and compare against
+	// the original payload — handles both string and object representations.
+	b, _ := json.Marshal(settings)
+	s := string(b)
+	if !strings.Contains(s, `"theme":"dark"`) || !strings.Contains(s, `"count":3`) {
+		t.Errorf("settings did not round-trip cleanly: got %s", s)
+	}
+}
+
 // Ensure unused imports are consumed.
 var _ = (*sql.DB)(nil)
 var _ = meta.ResourceDefinition{}
