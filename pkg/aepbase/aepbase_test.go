@@ -3089,6 +3089,109 @@ func TestUserUpdateSelf(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Fatalf("bob login with new password: expected 200, got %d", resp.StatusCode)
 	}
+
+	// Bob can change his own email, and the new email works for login.
+	resp = doAuthRequest(t, h, "PATCH", "/users/"+bobID, `{"email":"bob2@test.com"}`, bobToken)
+	if resp.StatusCode != 200 {
+		t.Fatalf("bob change email: expected 200, got %d", resp.StatusCode)
+	}
+	resp = doAuthRequest(t, h, "POST", "/users/:login", `{"email":"bob2@test.com","password":"newpass"}`, "")
+	if resp.StatusCode != 200 {
+		t.Fatalf("bob login with new email: expected 200, got %d", resp.StatusCode)
+	}
+}
+
+// TestUserUpdatePermissions verifies that regular users cannot change another
+// user's password or email, that superusers can, and that unauthenticated
+// PATCH requests are rejected.
+func TestUserUpdatePermissions(t *testing.T) {
+	d, err := db.Init(":memory:")
+	if err != nil {
+		t.Fatalf("db.Init: %v", err)
+	}
+	t.Cleanup(func() { d.Close() })
+	state := aepbase.NewState(d, "http://localhost:8080")
+
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+	if err := state.EnableUsers(); err != nil {
+		os.Stdout = oldStdout
+		t.Fatalf("EnableUsers: %v", err)
+	}
+	w.Close()
+	os.Stdout = oldStdout
+	outBytes, _ := io.ReadAll(r)
+	var password string
+	for _, line := range strings.Split(string(outBytes), "\n") {
+		if strings.Contains(line, "Password:") {
+			parts := strings.SplitN(line, ":", 2)
+			if len(parts) == 2 {
+				password = strings.TrimSpace(parts[1])
+			}
+		}
+	}
+
+	h := state.Handler()
+	adminToken := loginAdmin(t, h, password)
+
+	// Create two regular users.
+	resp := doAuthRequest(t, h, "POST", "/users", `{"email":"alice@test.com","password":"alicepass","type":"regular"}`, adminToken)
+	alice := readJSON(t, resp)
+	aliceID := alice["id"].(string)
+
+	resp = doAuthRequest(t, h, "POST", "/users", `{"email":"bob@test.com","password":"bobpass","type":"regular"}`, adminToken)
+	bob := readJSON(t, resp)
+	bobID := bob["id"].(string)
+
+	// Login as alice.
+	resp = doAuthRequest(t, h, "POST", "/users/:login", `{"email":"alice@test.com","password":"alicepass"}`, "")
+	aliceLogin := readJSON(t, resp)
+	aliceToken := aliceLogin["token"].(string)
+
+	// Alice cannot change bob's password.
+	resp = doAuthRequest(t, h, "PATCH", "/users/"+bobID, `{"password":"hacked"}`, aliceToken)
+	if resp.StatusCode != 403 {
+		t.Fatalf("alice change bob password: expected 403, got %d", resp.StatusCode)
+	}
+
+	// Alice cannot change bob's email.
+	resp = doAuthRequest(t, h, "PATCH", "/users/"+bobID, `{"email":"hacked@test.com"}`, aliceToken)
+	if resp.StatusCode != 403 {
+		t.Fatalf("alice change bob email: expected 403, got %d", resp.StatusCode)
+	}
+
+	// Bob's original credentials still work.
+	resp = doAuthRequest(t, h, "POST", "/users/:login", `{"email":"bob@test.com","password":"bobpass"}`, "")
+	if resp.StatusCode != 200 {
+		t.Fatalf("bob original login after failed hijack: expected 200, got %d", resp.StatusCode)
+	}
+
+	// Unauthenticated PATCH is rejected.
+	resp = doAuthRequest(t, h, "PATCH", "/users/"+bobID, `{"password":"newpass"}`, "")
+	if resp.StatusCode != 401 {
+		t.Fatalf("unauthenticated update: expected 401, got %d", resp.StatusCode)
+	}
+
+	// Superuser can change another user's password.
+	resp = doAuthRequest(t, h, "PATCH", "/users/"+aliceID, `{"password":"adminset"}`, adminToken)
+	if resp.StatusCode != 200 {
+		t.Fatalf("admin change alice password: expected 200, got %d", resp.StatusCode)
+	}
+	resp = doAuthRequest(t, h, "POST", "/users/:login", `{"email":"alice@test.com","password":"adminset"}`, "")
+	if resp.StatusCode != 200 {
+		t.Fatalf("alice login with admin-set password: expected 200, got %d", resp.StatusCode)
+	}
+
+	// Superuser can change another user's email.
+	resp = doAuthRequest(t, h, "PATCH", "/users/"+aliceID, `{"email":"alice2@test.com"}`, adminToken)
+	if resp.StatusCode != 200 {
+		t.Fatalf("admin change alice email: expected 200, got %d", resp.StatusCode)
+	}
+	resp = doAuthRequest(t, h, "POST", "/users/:login", `{"email":"alice2@test.com","password":"adminset"}`, "")
+	if resp.StatusCode != 200 {
+		t.Fatalf("alice login with new email: expected 200, got %d", resp.StatusCode)
+	}
 }
 
 // TestKebabCaseParentFK creates a parent with a kebab-case singular
