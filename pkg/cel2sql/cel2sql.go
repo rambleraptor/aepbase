@@ -70,6 +70,8 @@ func convertCallWithTarget(function string, target *exprpb.Expr, args []*exprpb.
 		return fmt.Sprintf("%s LIKE CONCAT('%%', %s, '%%')", targetSQL, argSQL), nil
 	case "endsWith":
 		return fmt.Sprintf("%s LIKE CONCAT('%%', %s)", targetSQL, argSQL), nil
+	case "matches":
+		return fmt.Sprintf("%s REGEXP %s", targetSQL, argSQL), nil
 	default:
 		return "", fmt.Errorf("unsupported function: %s", function)
 	}
