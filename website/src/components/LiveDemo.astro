@@ -1,0 +1,340 @@
+---
+const initialBook = JSON.stringify({
+  singular: "book",
+  plural: "books",
+  schema: {
+    type: "object",
+    properties: {
+      title: { type: "string" },
+      author: { type: "string" },
+      year: { type: "integer" }
+    }
+  }
+}, null, 2);
+---
+
+<section class="livedemo" id="live-demo">
+  <div class="livedemo-inner">
+    <div class="section-header">
+      <h2>Define a resource, watch APIs appear.</h2>
+      <p>Edit the JSON, deploy, see what aepbase generates.</p>
+    </div>
+
+    <div class="livedemo-frame">
+      <div class="livedemo-editor">
+        <div class="livedemo-editor-head">
+          <span class="livedemo-editor-title">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+            resource.json
+          </span>
+          <div class="livedemo-preset-row" id="livedemo-presets">
+            <button class="livedemo-preset active" data-preset="book" type="button">book</button>
+            <button class="livedemo-preset" data-preset="user" type="button">user</button>
+            <button class="livedemo-preset" data-preset="order" type="button">order</button>
+          </div>
+        </div>
+        <textarea class="livedemo-textarea" id="livedemo-source" spellcheck="false">{initialBook}</textarea>
+        <div class="livedemo-btn-row">
+          <button class="livedemo-deploy" id="livedemo-deploy" type="button"><span>→</span> Deploy</button>
+          <span class="livedemo-status ok" id="livedemo-status">Deployed · 5 endpoints live</span>
+        </div>
+      </div>
+
+      <div class="livedemo-preview">
+        <div class="livedemo-preview-head">
+          <span class="livedemo-preview-title">Generated</span>
+          <div class="livedemo-tabs" id="livedemo-tabs">
+            <button class="livedemo-tab active" data-tab="endpoints" type="button">endpoints</button>
+            <button class="livedemo-tab" data-tab="openapi" type="button">openapi</button>
+          </div>
+        </div>
+        <div class="livedemo-preview-body" id="livedemo-preview-body"></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<script>
+  const PRESETS = {
+    book: {
+      singular: 'book', plural: 'books',
+      schema: { type: 'object', properties: {
+        title: { type: 'string' },
+        author: { type: 'string' },
+        year: { type: 'integer' }
+      }}
+    },
+    user: {
+      singular: 'user', plural: 'users',
+      schema: { type: 'object', properties: {
+        email: { type: 'string', format: 'email' },
+        fullName: { type: 'string' },
+        role: { type: 'string', enum: ['admin', 'member'] }
+      }}
+    },
+    order: {
+      singular: 'order', plural: 'orders', parent: 'users',
+      schema: { type: 'object', properties: {
+        total: { type: 'number' },
+        currency: { type: 'string' },
+        status: { type: 'string', enum: ['pending', 'paid', 'shipped'] }
+      }}
+    }
+  };
+
+  function deriveEndpoints(def) {
+    if (!def || !def.plural) return [];
+    const prefix = def.parent ? `/${def.parent}/{parent}` : '';
+    const col = `${prefix}/${def.plural}`;
+    const item = `${col}/{id}`;
+    return [
+      { method: 'POST',   path: col,  desc: `Create a ${def.singular}` },
+      { method: 'GET',    path: col,  desc: `List ${def.plural}` },
+      { method: 'GET',    path: item, desc: `Get a ${def.singular}` },
+      { method: 'PATCH',  path: item, desc: `Update a ${def.singular}` },
+      { method: 'DELETE', path: item, desc: `Delete a ${def.singular}` },
+    ];
+  }
+
+  const ERROR_SCHEMA = {
+    properties: {
+      error: {
+        description: 'Error details.',
+        example: { code: 400, message: 'something went wrong' },
+        properties: {
+          code:    { description: 'The HTTP status code.', example: 400, type: 'integer' },
+          message: { description: 'A human-readable error message.', example: 'something went wrong', type: 'string' }
+        },
+        type: 'object'
+      }
+    },
+    type: 'object'
+  };
+  const errResp = (code, msg, desc) => ({
+    content: {
+      'application/json': {
+        example: { error: { code, message: msg } },
+        schema: ERROR_SCHEMA
+      }
+    },
+    description: desc
+  });
+
+  function deriveOpenAPI(def) {
+    if (!def || !def.singular || !def.plural) return '';
+    const s = def.singular;
+    const p = def.plural;
+    const Cap = s.charAt(0).toUpperCase() + s.slice(1);
+    const idParam = `${s.replace(/-/g, '_')}_id`;
+    const parentIdParam = def.parent ? `${def.parent.replace(/s$/, '').replace(/-/g, '_')}_id` : null;
+    const parentPrefix = def.parent ? `/${def.parent}/{${parentIdParam}}` : '';
+    const colPath = `${parentPrefix}/${p}`;
+    const itemPath = `${colPath}/{${idParam}}`;
+    const tag = s;
+    const ref = `#/components/schemas/${s}`;
+
+    const pathParams = [];
+    if (parentIdParam) pathParams.push({
+      description: `The ID of the ${def.parent.replace(/s$/, '')}.`,
+      example: `my-${def.parent.replace(/s$/, '')}`,
+      in: 'path', name: parentIdParam, required: true, schema: { type: 'string' }
+    });
+    const itemPathParams = [...pathParams, {
+      description: `The ID of the ${s}.`,
+      example: `my-${s}`,
+      in: 'path', name: idParam, required: true, schema: { type: 'string' }
+    }];
+
+    const listOp = {
+      description: `Returns a paginated list of ${p}.`,
+      operationId: `List${Cap}`,
+      parameters: [
+        ...pathParams,
+        { description: 'The maximum number of results to return per page.', example: 25, in: 'query', name: 'max_page_size', schema: { type: 'integer' } },
+        { description: 'A token from a previous list response to fetch the next page.', example: 'eyJsYXN0X2lkIjoiMTIzIn0=', in: 'query', name: 'page_token', schema: { type: 'string' } },
+        { description: 'The number of results to skip before returning.', example: 0, in: 'query', name: 'skip', schema: { type: 'integer' } },
+        { description: 'A filter expression to narrow results (e.g. "author=Orwell").', example: 'author=Orwell', in: 'query', name: 'filter', schema: { type: 'string' } }
+      ],
+      responses: {
+        '200': {
+          content: {
+            'application/json': {
+              schema: {
+                properties: {
+                  next_page_token: { description: 'A token to retrieve the next page of results. Empty if there are no more results.', example: '', type: 'string' },
+                  results: { description: `The list of ${p}.`, items: { $ref: ref }, type: 'array' }
+                },
+                type: 'object'
+              }
+            }
+          },
+          description: 'Successful response'
+        },
+        '400': errResp(400, 'invalid filter expression', 'The request parameters are invalid.')
+      },
+      tags: [tag]
+    };
+
+    const createOp = {
+      description: `Creates a new ${s}.`,
+      operationId: `Create${Cap}`,
+      parameters: pathParams,
+      requestBody: { content: { 'application/json': { schema: { $ref: ref } } }, description: `The ${s} to create.`, required: true },
+      responses: {
+        '200': { content: { 'application/json': { schema: { $ref: ref } } }, description: 'Successful response' },
+        '400': errResp(400, 'invalid request body', 'The request body is invalid.'),
+        '409': errResp(409, `${s} with the given ID already exists`, `A ${s} with the given ID already exists.`)
+      },
+      tags: [tag]
+    };
+
+    const getOp = {
+      description: `Retrieves a single ${s} by ID.`,
+      operationId: `Get${Cap}`,
+      parameters: itemPathParams,
+      responses: {
+        '200': { content: { 'application/json': { schema: { $ref: ref } } }, description: 'Successful response' },
+        '404': errResp(404, `${s} not found.`, `The ${s} was not found.`)
+      },
+      tags: [tag]
+    };
+
+    const patchOp = {
+      description: `Updates an existing ${s}. Only the fields provided in the request body are modified.`,
+      operationId: `Update${Cap}`,
+      parameters: itemPathParams,
+      requestBody: { content: { 'application/merge-patch+json': { schema: { $ref: ref } } }, description: `The fields to update on the ${s}.`, required: true },
+      responses: {
+        '200': { content: { 'application/json': { schema: { $ref: ref } } }, description: 'Successful response' },
+        '400': errResp(400, 'invalid request body', 'The request body is invalid.'),
+        '404': errResp(404, `${s} not found.`, `The ${s} was not found.`)
+      },
+      tags: [tag]
+    };
+
+    const putOp = {
+      description: `Creates or replaces a ${s}.`,
+      operationId: `Apply${Cap}`,
+      parameters: itemPathParams,
+      requestBody: { content: { 'application/json': { schema: { $ref: ref } } }, description: `The full ${s} to create or replace.`, required: true },
+      responses: {
+        '200': { content: { 'application/json': { schema: { $ref: ref } } }, description: 'Successful response' },
+        '400': errResp(400, 'invalid request body', 'The request body is invalid.')
+      },
+      tags: [tag]
+    };
+
+    const deleteOp = {
+      description: `Deletes a ${s} by ID.`,
+      operationId: `Delete${Cap}`,
+      parameters: itemPathParams,
+      responses: {
+        '204': { content: { 'application/json': { example: {}, schema: { type: 'object' } } }, description: 'Successful response' },
+        '404': errResp(404, `${s} not found.`, `The ${s} was not found.`)
+      },
+      tags: [tag]
+    };
+
+    return JSON.stringify({
+      openapi: '3.1.0',
+      info: { title: `${s} API`, version: '1.0.0' },
+      paths: {
+        [colPath]: { get: listOp, post: createOp },
+        [itemPath]: { delete: deleteOp, get: getOp, patch: patchOp, put: putOp }
+      },
+      components: { schemas: { [s]: def.schema } },
+      servers: [{ url: 'http://localhost:8080' }],
+      tags: [{ description: `A ${s}.`, name: tag }]
+    }, null, 2);
+  }
+
+  function escapeHtml(s) {
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  function initLiveDemo() {
+    const textarea = document.getElementById('livedemo-source');
+    const status = document.getElementById('livedemo-status');
+    const deployBtn = document.getElementById('livedemo-deploy');
+    const body = document.getElementById('livedemo-preview-body');
+    const presetRow = document.getElementById('livedemo-presets');
+    const tabsRow = document.getElementById('livedemo-tabs');
+    if (!textarea || !status || !deployBtn || !body || !presetRow || !tabsRow) return;
+
+    let deployed = PRESETS.book;
+    let currentTab = 'endpoints';
+
+    function renderPreview() {
+      if (currentTab === 'endpoints') {
+        const eps = deriveEndpoints(deployed);
+        body.innerHTML =
+          '<div class="endpoints-list" style="gap:0.45rem">' +
+          eps.map(ep =>
+            `<div class="endpoint" style="animation:none"><span class="endpoint-method ${ep.method}">${ep.method}</span><span class="endpoint-path">${escapeHtml(ep.path)}</span><span style="font-size:0.72rem;color:var(--text-muted);margin-left:auto;white-space:nowrap">${escapeHtml(ep.desc)}</span></div>`
+          ).join('') +
+          '</div>';
+      } else {
+        body.innerHTML = `<pre>${escapeHtml(deriveOpenAPI(deployed))}</pre>`;
+      }
+    }
+
+    function setStatus(kind, msg) {
+      status.className = 'livedemo-status ' + kind;
+      status.textContent = msg;
+    }
+
+    function deploy() {
+      deployBtn.disabled = true;
+      setStatus('pending', 'Deploying…');
+      setTimeout(() => {
+        try {
+          const parsed = JSON.parse(textarea.value);
+          if (!parsed.singular || !parsed.plural) throw new Error('Need singular + plural');
+          deployed = parsed;
+          setStatus('ok', `Deployed · ${deriveEndpoints(parsed).length} endpoints live`);
+          renderPreview();
+        } catch (e) {
+          setStatus('err', `Error: ${e.message}`);
+        }
+        deployBtn.disabled = false;
+      }, 600);
+    }
+
+    deployBtn.addEventListener('click', deploy);
+
+    presetRow.addEventListener('click', (e) => {
+      const btn = e.target.closest('.livedemo-preset');
+      if (!btn) return;
+      const key = btn.dataset.preset;
+      const next = PRESETS[key];
+      if (!next) return;
+      presetRow.querySelectorAll('.livedemo-preset').forEach(el => el.classList.remove('active'));
+      btn.classList.add('active');
+      textarea.value = JSON.stringify(next, null, 2);
+      deployed = next;
+      setStatus('ok', `Deployed · ${deriveEndpoints(next).length} endpoints live`);
+      currentTab = 'endpoints';
+      tabsRow.querySelectorAll('.livedemo-tab').forEach(el => {
+        el.classList.toggle('active', el.dataset.tab === 'endpoints');
+      });
+      renderPreview();
+    });
+
+    tabsRow.addEventListener('click', (e) => {
+      const btn = e.target.closest('.livedemo-tab');
+      if (!btn) return;
+      currentTab = btn.dataset.tab;
+      tabsRow.querySelectorAll('.livedemo-tab').forEach(el => el.classList.remove('active'));
+      btn.classList.add('active');
+      renderPreview();
+    });
+
+    renderPreview();
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initLiveDemo);
+  } else {
+    initLiveDemo();
+  }
+</script>
