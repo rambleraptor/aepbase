@@ -1,0 +1,118 @@
+---
+---
+
+<section class="hero hero-variant-split">
+  <div class="hero-inner">
+    <div class="hero-top">
+      <div class="hero-text">
+        <h1>
+          Define your resources.<br />
+          <span class="strike">Write boilerplate.</span><br />
+          Get <span class="accent">everything else</span> for free.
+        </h1>
+        <p class="hero-subtitle">
+          Define resources at runtime and get <a href="https://aep.dev">AEP</a>-compliant
+          CRUD endpoints, a database, and the full AEP tooling ecosystem — ready for
+          you and your agents.
+        </p>
+        <div class="hero-actions">
+          <a href="https://github.com/aep-dev/aepbase" class="btn btn-primary">
+            Get started
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
+          </a>
+        </div>
+      </div>
+      <div class="hero-terminal-col">
+        <div class="terminal tall">
+          <div class="terminal-header">
+            <div class="terminal-dots"><span></span><span></span><span></span></div>
+            <span class="terminal-title">aepbase — localhost:8080</span>
+            <div class="terminal-tab-row">
+              <span class="terminal-tab active">curl</span>
+              <span class="terminal-tab">api</span>
+            </div>
+          </div>
+          <div class="terminal-body" id="hero-terminal-body"><div class="line"><span class="t-prompt">$</span><span class="t-cmd">curl -X POST localhost:8080/aep-resource-definitions \</span><span class="cursor"></span></div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<script>
+  const HERO_SCRIPT = [
+    { type: 'prompt',   cmd: 'curl -X POST localhost:8080/aep-resource-definitions \\' },
+    { type: 'cmd-cont', cmd: '  -d \'{"singular":"book","plural":"books",' },
+    { type: 'cmd-cont', cmd: '       "schema":{"type":"object","properties":{' },
+    { type: 'cmd-cont', cmd: '         "title":{"type":"string"},"author":{"type":"string"}}}}\'' },
+    { type: 'output',   cmd: '{"singular":"book","plural":"books","schema":{...}}', ok: true },
+    { type: 'comment',  cmd: "# That's it. Your API is live." },
+    { type: 'blank' },
+    { type: 'prompt',   cmd: 'curl -X POST localhost:8080/books \\' },
+    { type: 'cmd-cont', cmd: '  -d \'{"title":"1984","author":"Orwell"}\'' },
+    { type: 'output',   cmd: '{"id":"my-book","title":"1984","author":"Orwell"}', ok: true },
+    { type: 'blank' },
+    { type: 'prompt',   cmd: 'curl localhost:8080/books' },
+    { type: 'output',   cmd: '{"results":[{"id":"my-book","title":"1984","author":"Orwell"}],"next_page_token":""}', ok: true },
+  ];
+
+  function escapeHtml(s) {
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  function initTerminal() {
+    const body = document.getElementById('hero-terminal-body');
+    if (!body) return;
+    let step = 0;
+    const render = () => {
+      const visible = HERO_SCRIPT.slice(0, step + 1);
+      let html = '';
+      visible.forEach((s, idx) => {
+        const isLast = idx === visible.length - 1;
+        const showCursor = isLast && s.type !== 'output' && s.type !== 'comment' && s.type !== 'blank';
+        switch (s.type) {
+          case 'prompt':
+            html += `<div class="line"><span class="t-prompt">$</span><span class="t-cmd">${escapeHtml(s.cmd)}</span>${showCursor ? '<span class="cursor"></span>' : ''}</div>`;
+            break;
+          case 'cmd-cont':
+            html += `<div class="line"><span class="t-cmd">${escapeHtml(s.cmd)}</span>${showCursor ? '<span class="cursor"></span>' : ''}</div>`;
+            break;
+          case 'output':
+            html += `<div class="line"><span class="${s.ok ? 't-success' : 't-output'}">${escapeHtml(s.cmd)}</span></div>`;
+            break;
+          case 'comment':
+            html += `<div class="line"><span class="t-comment">${escapeHtml(s.cmd)}</span></div>`;
+            break;
+          case 'blank':
+            html += `<div class="blank"></div>`;
+            break;
+        }
+      });
+      body.innerHTML = html;
+      body.scrollTop = body.scrollHeight;
+    };
+
+    const advance = () => {
+      const current = HERO_SCRIPT[step];
+      if (!current) {
+        setTimeout(() => { step = 0; render(); advance(); }, 3500);
+        return;
+      }
+      const delay =
+        current.type === 'output'  ? 900 :
+        current.type === 'comment' ? 1100 :
+        current.type === 'blank'   ? 300 :
+        current.type === 'prompt'  ? 650 : 500;
+      setTimeout(() => { step++; render(); advance(); }, delay);
+    };
+
+    render();
+    advance();
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initTerminal);
+  } else {
+    initTerminal();
+  }
+</script>

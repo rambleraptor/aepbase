@@ -1,0 +1,82 @@
+---
+const step1 = `<span class="t-prompt">$</span> <span class="t-cmd">go build -o aepbase ./</span>
+<span class="t-prompt">$</span> <span class="t-cmd">./aepbase</span>
+<span class="t-success">✓ server started on :8080</span>`;
+
+const step2 = `<span class="t-prompt">$</span> <span class="t-cmd">curl -X POST localhost:8080/aep-resource-definitions \\</span>
+  <span class="t-cmd">-H </span><span class="t-str">"Content-Type: application/json"</span> <span class="t-cmd">\\</span>
+  <span class="t-cmd">-d </span><span class="t-str">'{</span>
+    <span class="t-key">"singular"</span><span class="t-cmd">: </span><span class="t-str">"book"</span><span class="t-cmd">,</span>
+    <span class="t-key">"plural"</span><span class="t-cmd">: </span><span class="t-str">"books"</span><span class="t-cmd">,</span>
+    <span class="t-key">"schema"</span><span class="t-cmd">: {</span>
+      <span class="t-key">"properties"</span><span class="t-cmd">: {</span>
+        <span class="t-key">"title"</span><span class="t-cmd">:  {</span><span class="t-key">"type"</span><span class="t-cmd">: </span><span class="t-str">"string"</span><span class="t-cmd">},</span>
+        <span class="t-key">"author"</span><span class="t-cmd">: {</span><span class="t-key">"type"</span><span class="t-cmd">: </span><span class="t-str">"string"</span><span class="t-cmd">}</span>
+      <span class="t-cmd">}</span>
+    <span class="t-cmd">}</span>
+  <span class="t-cmd">}</span><span class="t-str">'</span>`;
+
+const step3 = `<span class="t-comment"># Create a book</span>
+<span class="t-prompt">$</span> <span class="t-cmd">curl -X POST localhost:8080/books \\</span>
+  <span class="t-cmd">-d </span><span class="t-str">'{"id":"1984","title":"1984","author":"Orwell"}'</span>
+
+<span class="t-comment"># List all books</span>
+<span class="t-prompt">$</span> <span class="t-cmd">curl localhost:8080/books</span>
+<span class="t-success">{ "results": [{"id":"1984", ...}], "nextPageToken": "" }</span>`;
+---
+
+<section class="how-it-works" id="how-it-works">
+  <div class="how-inner">
+    <div class="section-header">
+      <h2>Up and running in minutes.</h2>
+      <p>Three steps from zero to a live API.</p>
+    </div>
+
+    <div class="steps">
+      <div class="step">
+        <div class="step-number">1</div>
+        <div class="step-content">
+          <h3>Start the server</h3>
+          <p>Build and run the binary. No config files, no database setup.</p>
+          <div class="code-block">
+            <div class="code-header">
+              <span>~/projects</span>
+              <span class="mono">sh</span>
+            </div>
+            <pre><code set:html={step1} /></pre>
+          </div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-number">2</div>
+        <div class="step-content">
+          <h3>Define a resource</h3>
+          <p>POST a JSON schema to the meta-API. Your endpoints are immediately live.</p>
+          <div class="code-block">
+            <div class="code-header">
+              <span>define a resource</span>
+              <span class="mono">sh</span>
+            </div>
+            <pre><code set:html={step2} /></pre>
+          </div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-number">3</div>
+        <div class="step-content">
+          <h3>Use your API</h3>
+          <p>Create, read, update, delete, and list resources. Grab the OpenAPI spec. Connect your frontend.</p>
+          <div class="code-block">
+            <div class="code-header">
+              <span>use your API</span>
+              <span class="mono">sh</span>
+            </div>
+            <pre><code set:html={step3} /></pre>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
