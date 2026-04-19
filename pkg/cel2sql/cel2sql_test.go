@@ -62,6 +62,11 @@ func TestConvert(t *testing.T) {
 			input:    "!active",
 			expected: "NOT (active)",
 		},
+		{
+			name:     "matches",
+			input:    "name.matches('^A.*')",
+			expected: "name REGEXP '^A.*'",
+		},
 	}
 
 	for _, tt := range tests {
