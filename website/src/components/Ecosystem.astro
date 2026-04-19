@@ -1,0 +1,65 @@
+---
+const tools = [
+  {
+    accent: 'var(--olive-leaf)',
+    accentBg: 'rgba(96,108,56,0.1)',
+    tag: 'CLI',
+    title: 'aepcli',
+    body: 'Typed CLI generated from your OpenAPI spec.',
+    href: 'https://github.com/aep-dev/aepcli',
+    icon: '<polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>'
+  },
+  {
+    accent: 'var(--copper)',
+    accentBg: 'rgba(188,108,37,0.1)',
+    tag: 'Web UI',
+    title: 'AEP Explorer',
+    body: 'Web admin panel for browsing your resources.',
+    href: 'https://github.com/aep-dev/aep-explorer',
+    icon: '<rect x="2" y="4" width="20" height="16" rx="2"/><line x1="2" y1="9" x2="22" y2="9"/><circle cx="5.5" cy="6.5" r="0.5" fill="currentColor"/><circle cx="8" cy="6.5" r="0.5" fill="currentColor"/><circle cx="10.5" cy="6.5" r="0.5" fill="currentColor"/>'
+  },
+  {
+    accent: 'var(--light-caramel)',
+    accentBg: 'rgba(221,161,94,0.18)',
+    tag: 'AI',
+    title: 'MCP Server',
+    body: 'Expose your API to any MCP-compatible agent.',
+    href: 'https://github.com/aep-dev/aep-mcp-server',
+    icon: '<path d="M12 3l1.9 5.3a2 2 0 0 0 1.3 1.3L20.5 11.5l-5.3 1.9a2 2 0 0 0-1.3 1.3L12 20l-1.9-5.3a2 2 0 0 0-1.3-1.3L3.5 11.5l5.3-1.9a2 2 0 0 0 1.3-1.3L12 3z"/>'
+  },
+  {
+    accent: 'var(--olive-leaf)',
+    accentBg: 'rgba(96,108,56,0.1)',
+    tag: 'IaC',
+    title: 'Terraform Provider',
+    body: 'Manage aepbase resources as infrastructure as code.',
+    href: 'https://github.com/aep-dev/terraform-provider-aep',
+    icon: '<path d="M7.97 4.42A2 2 0 0 0 7 6.13v4.37l5 3 5-3V6.13a2 2 0 0 0-.97-1.71l-3-1.8a2 2 0 0 0-2.06 0z"/><path d="M12 8 7.26 5.15"/><path d="m12 8 4.74-2.85"/><path d="M12 13.5V8"/>'
+  }
+];
+---
+
+<section class="ecosystem" id="ecosystem">
+  <div class="ecosystem-inner">
+    <div class="section-header">
+      <h2>Plays nicely with the <a href="https://aep.dev" style="color: inherit; border-bottom: 2px solid var(--copper)">AEP</a> toolchain.</h2>
+      <p>Use the full ecosystem of AEP-enabled tools with no configuration beyond an OpenAPI spec.</p>
+    </div>
+    <div class="tools-grid">
+      {tools.map((t) => (
+        <a href={t.href} class="tool-card" style={`--accent:${t.accent};--accent-bg:${t.accentBg}`}>
+          <div class="tool-icon">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" set:html={t.icon}></svg>
+          </div>
+          <span class="tool-tag">{t.tag}</span>
+          <h3>{t.title}</h3>
+          <p>{t.body}</p>
+          <span class="tool-link">
+            View on GitHub
+            <span class="tool-link-arrow">→</span>
+          </span>
+        </a>
+      ))}
+    </div>
+  </div>
+</section>
