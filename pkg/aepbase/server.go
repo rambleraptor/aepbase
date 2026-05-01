@@ -18,13 +18,16 @@ import (
 // ServerOptions configures an aepbase server.
 // Zero-value fields use sensible defaults (port 8080, DB "aepbase.db").
 type ServerOptions struct {
-	Port               int
-	DataDir            string
-	DBFile             string
-	InMemory           bool
+	Port     int
+	DataDir  string
+	DBFile   string
+	InMemory bool
+	// Defaults to ["https://ui.aep.dev"]. Setting this replaces the default.
 	CORSAllowedOrigins []string
-	CustomMethods      []CustomMethodOption
-	ExportResources    bool
+	// Turns CORS off entirely (no headers sent, default origin not added).
+	DisableCORS     bool
+	CustomMethods   []CustomMethodOption
+	ExportResources bool
 	// EnableFileFields turns on experimental support for file-field properties
 	// on resources (schema extension x-aepbase-file-field: true). File fields
 	// are NOT part of the AEP specification and this option is intentionally
@@ -71,7 +74,8 @@ func (o *ServerOptions) RegisterFlags() {
 	flag.IntVar(&o.Port, "port", o.Port, "port to listen on")
 	flag.StringVar(&o.DataDir, "data-dir", o.DataDir, "directory for database files")
 	flag.StringVar(&o.DBFile, "db", o.DBFile, "database file name")
-	flag.StringVar(&o.corsRaw, "cors-allowed-origins", "", "comma-separated list of allowed CORS origins (e.g. \"https://ui.aep.dev,http://localhost:3000\")")
+	flag.StringVar(&o.corsRaw, "cors-allowed-origins", "", "comma-separated list of allowed CORS origins, replacing the default (https://ui.aep.dev)")
+	flag.BoolVar(&o.DisableCORS, "disable-cors", false, "disable CORS entirely (no Access-Control-* headers)")
 	flag.BoolVar(&o.ExportResources, "export-resources", false, "output the OpenAPI spec for user-defined resources only (excludes built-in endpoints) and exit")
 }
 
@@ -90,6 +94,11 @@ func Run(opts ServerOptions) error {
 	// If RegisterFlags was used, merge the parsed CORS flag.
 	if opts.corsRaw != "" && len(opts.CORSAllowedOrigins) == 0 {
 		opts.CORSAllowedOrigins = strings.Split(opts.corsRaw, ",")
+	}
+	if opts.DisableCORS {
+		opts.CORSAllowedOrigins = nil
+	} else if len(opts.CORSAllowedOrigins) == 0 {
+		opts.CORSAllowedOrigins = []string{"https://ui.aep.dev"}
 	}
 
 	serverURL := fmt.Sprintf("http://localhost:%d", opts.Port)
