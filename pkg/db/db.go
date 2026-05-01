@@ -7,7 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	_ "modernc.org/sqlite"
+	_ "github.com/ncruces/go-sqlite3/driver"
+	_ "github.com/ncruces/go-sqlite3/embed"
 )
 
 func Init(dbPath string) (*sql.DB, error) {
@@ -16,7 +17,7 @@ func Init(dbPath string) (*sql.DB, error) {
 			return nil, fmt.Errorf("creating data directory: %w", err)
 		}
 	}
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("opening database: %w", err)
 	}
