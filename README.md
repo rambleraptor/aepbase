@@ -29,7 +29,8 @@ Server starts at `http://localhost:8080`.
 |------|---------|-------------|
 | `-port` | `8080` | Listen port |
 | `-db` | `aepbase.db` | SQLite database path |
-| `-cors-allowed-origins` | *(none)* | Comma-separated allowed origins (`*` for all) |
+| `-cors-allowed-origins` | `https://ui.aep.dev` | Comma-separated allowed origins (`*` for all). Replaces the default. |
+| `-disable-cors` | `false` | Disable CORS entirely (no `Access-Control-*` headers) |
 
 ### Define a resource
 
@@ -126,13 +127,7 @@ aepcli $API book :purchase 1984 \
 
 ## Web UI
 
-You can browse and manage your resources through [AEP Explorer](https://github.com/aep-dev/aep-explorer), a web UI for AEP-compliant APIs. Start aepbase with CORS enabled:
-
-```bash
-./aepbase -cors-allowed-origins "https://ui.aep.dev"
-```
-
-Then open [ui.aep.dev](https://ui.aep.dev) and paste in your OpenAPI URL:
+You can browse and manage your resources through [AEP Explorer](https://github.com/aep-dev/aep-explorer), a web UI for AEP-compliant APIs. `https://ui.aep.dev` is allowed by CORS by default, so just open [ui.aep.dev](https://ui.aep.dev) and paste in your OpenAPI URL:
 
 ```
 http://localhost:8080/openapi.json
