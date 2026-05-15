@@ -3276,6 +3276,54 @@ func TestObjectFieldJSONBinding(t *testing.T) {
 	}
 }
 
+// TestMiddleware_RunsOnEveryRequestInOrder verifies that middleware registered
+// via State.Use runs on every request and that multiple middlewares execute in
+// registration order (first registered is outermost).
+func TestMiddleware_RunsOnEveryRequestInOrder(t *testing.T) {
+	s := newTestState(t)
+
+	var order []string
+	s.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			order = append(order, "A-before")
+			next.ServeHTTP(w, r)
+			order = append(order, "A-after")
+		})
+	})
+	s.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			order = append(order, "B-before")
+			next.ServeHTTP(w, r)
+			order = append(order, "B-after")
+		})
+	})
+
+	resp := doRequest(t, s.Handler(), "GET", "/openapi.json", "")
+	if resp.StatusCode != 200 {
+		t.Fatalf("openapi: %d", resp.StatusCode)
+	}
+	got := strings.Join(order, ",")
+	want := "A-before,B-before,B-after,A-after"
+	if got != want {
+		t.Errorf("middleware order: got %q want %q", got, want)
+	}
+}
+
+// TestMiddleware_CanShortCircuit verifies that middleware can respond without
+// calling next, blocking downstream handlers.
+func TestMiddleware_CanShortCircuit(t *testing.T) {
+	s := newTestState(t)
+	s.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusTeapot)
+		})
+	})
+	resp := doRequest(t, s.Handler(), "GET", "/openapi.json", "")
+	if resp.StatusCode != http.StatusTeapot {
+		t.Errorf("short-circuit: got %d want 418", resp.StatusCode)
+	}
+}
+
 // Ensure unused imports are consumed.
 var _ = (*sql.DB)(nil)
 var _ = meta.ResourceDefinition{}

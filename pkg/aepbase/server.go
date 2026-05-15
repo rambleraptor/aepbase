@@ -39,6 +39,13 @@ type ServerOptions struct {
 	// superuser is created on first run. This option is intentionally
 	// library-only — it is not registered as a CLI flag. Off by default.
 	EnableUsers bool
+	// Middlewares are user-registered http handlers that run on every request,
+	// in registration order (first is outermost). They run after CORS preflight
+	// handling and, when EnableUsers is set, before the built-in auth middleware
+	// — so logging or rate-limiting middleware here will see all requests,
+	// including unauthenticated ones. To run middleware after auth has resolved
+	// the user, call State.Use() directly after aepbase.Run wires the state.
+	Middlewares []Middleware
 	corsRaw     string
 }
 
@@ -119,6 +126,11 @@ func Run(opts ServerOptions) error {
 	state.CORSAllowedOrigins = opts.CORSAllowedOrigins
 	if opts.EnableFileFields {
 		state.EnableFileFields(filepath.Join(opts.DataDir, "files"))
+	}
+	// Register user-provided middleware before EnableUsers so it wraps the
+	// built-in auth middleware (sees all requests, including 401s).
+	if len(opts.Middlewares) > 0 {
+		state.Use(opts.Middlewares...)
 	}
 	if opts.EnableUsers {
 		if err := state.EnableUsers(); err != nil {

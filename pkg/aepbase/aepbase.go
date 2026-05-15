@@ -22,6 +22,12 @@ import (
 	"github.com/rambleraptor/aepbase/pkg/user"
 )
 
+// Middleware is a function that wraps an http.Handler with additional behavior.
+// Middleware runs on every request (after CORS preflight handling). When
+// multiple middlewares are registered, they execute in registration order:
+// the first registered is the outermost wrapper and runs first.
+type Middleware = func(http.Handler) http.Handler
+
 // CustomMethodConfig defines a custom method to register on a resource.
 type CustomMethodConfig struct {
 	// HTTP method: "POST" or "GET".
@@ -68,6 +74,22 @@ type State struct {
 	// User support (library-only, opt-in, off by default). When usersEnabled
 	// is true, all requests (except login) require a valid auth token.
 	usersEnabled bool
+	// middlewares are user-registered wrappers run on every request, in
+	// registration order (first registered is outermost).
+	middlewares []Middleware
+}
+
+// Use registers middleware to run on every request. Middlewares run after
+// CORS preflight handling, in registration order — the first registered
+// is the outermost wrapper. Built-in features like user authentication
+// (see EnableUsers) register their own middleware via this same mechanism,
+// so calling Use before EnableUsers makes your middleware wrap auth, while
+// calling Use after EnableUsers makes your middleware run after auth has
+// resolved the user (accessible via user.FromContext).
+func (s *State) Use(mw ...Middleware) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.middlewares = append(s.middlewares, mw...)
 }
 
 // metaResourceSingular is the singular name for the built-in meta resource.
@@ -233,6 +255,7 @@ func (s *State) EnableUsers() error {
 	s.API.Resources[user.UserResourceSingular] = userResource
 
 	s.usersEnabled = true
+	s.middlewares = append(s.middlewares, user.Middleware(s.DB))
 	s.rebuildMux()
 	return nil
 }
@@ -1297,22 +1320,18 @@ func (w *muxWrapper) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	w.state.mu.RLock()
 	mux := w.state.mux
 	allowedOrigins := w.state.CORSAllowedOrigins
-	usersEnabled := w.state.usersEnabled
-	db := w.state.DB
+	middlewares := w.state.middlewares
 	w.state.mu.RUnlock()
 
 	if handleCORS(rw, req, allowedOrigins) {
 		return
 	}
 
-	if usersEnabled {
-		// Wrap with auth middleware. Login is exempt.
-		authMw := user.Middleware(db)
-		authMw(mux).ServeHTTP(rw, req)
-		return
+	var h http.Handler = mux
+	for i := len(middlewares) - 1; i >= 0; i-- {
+		h = middlewares[i](h)
 	}
-
-	mux.ServeHTTP(rw, req)
+	h.ServeHTTP(rw, req)
 }
 
 // handleCORS sets CORS headers if the request origin matches an allowed origin.
