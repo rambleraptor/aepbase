@@ -26,13 +26,20 @@ func WithContext(ctx context.Context, u *User) context.Context {
 // looks up the token in the database, and injects the User into the request
 // context. Requests without a valid token receive a 401 response.
 //
-// The login endpoint (POST /users/:login) and the OpenAPI spec endpoint
-// (GET /openapi.json) are exempt from auth.
+// The login endpoint (POST /users/:login), OAuth callback routes
+// (/oauth/...), and the OpenAPI spec endpoint (GET /openapi.json) are
+// exempt from auth.
 func Middleware(d *sql.DB) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Allow the login endpoint through without auth.
 			if r.Method == http.MethodPost && r.URL.Path == "/users/:login" {
+				next.ServeHTTP(w, r)
+				return
+			}
+			// Allow OAuth callback routes through without auth — these
+			// are how unauthenticated users obtain their first token.
+			if strings.HasPrefix(r.URL.Path, "/oauth/") {
 				next.ServeHTTP(w, r)
 				return
 			}
