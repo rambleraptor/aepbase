@@ -1,0 +1,63 @@
+---
+import Layout from '../../layouts/Layout.astro';
+import Nav from '../../components/Nav.astro';
+
+type DocModule = {
+  Content: any;
+  frontmatter?: Record<string, any>;
+  getHeadings: () => Array<{ depth: number; slug: string; text: string }>;
+};
+
+export async function getStaticPaths() {
+  const docs = import.meta.glob<DocModule>('../../../../docs/*.md', { eager: true });
+  const entries = Object.entries(docs).map(([path, mod]) => {
+    const filename = path.split('/').pop() ?? '';
+    const slug = filename.replace(/\.md$/, '');
+    const headings = mod.getHeadings();
+    const title = mod.frontmatter?.title ?? headings.find((h) => h.depth === 1)?.text ?? slug;
+    return { slug, title, mod };
+  });
+
+  return entries.map(({ slug, title, mod }) => ({
+    params: { slug },
+    props: {
+      mod,
+      title,
+      docs: entries.map(({ slug: s, title: t }) => ({ slug: s, title: t })),
+    },
+  }));
+}
+
+const { mod, title, docs } = Astro.props;
+const { Content } = mod;
+const currentSlug = Astro.params.slug;
+const sortedDocs = [...docs].sort((a, b) => a.title.localeCompare(b.title));
+---
+
+<Layout title={`${title} — aepbase docs`}>
+  <Nav alwaysVisible />
+  <main class="docs-main">
+    <div class="docs-shell">
+      <aside class="docs-sidebar">
+        <div class="docs-sidebar-heading">Docs</div>
+        <nav>
+          <ul class="docs-nav">
+            {sortedDocs.map((d) => (
+              <li>
+                <a
+                  href={`/docs/${d.slug}`}
+                  class:list={['docs-nav-link', { 'is-active': d.slug === currentSlug }]}
+                >
+                  {d.title}
+                </a>
+              </li>
+            ))}
+          </ul>
+        </nav>
+      </aside>
+      <article class="docs-article">
+        <Content />
+      </article>
+    </div>
+  </main>
+</Layout>
