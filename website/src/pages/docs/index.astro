@@ -1,0 +1,39 @@
+---
+import Layout from '../../layouts/Layout.astro';
+import Nav from '../../components/Nav.astro';
+
+type DocModule = {
+  frontmatter?: Record<string, any>;
+  getHeadings: () => Array<{ depth: number; slug: string; text: string }>;
+};
+
+const modules = import.meta.glob<DocModule>('../../../../docs/*.md', { eager: true });
+const docs = Object.entries(modules)
+  .map(([path, mod]) => {
+    const filename = path.split('/').pop() ?? '';
+    const slug = filename.replace(/\.md$/, '');
+    const headings = mod.getHeadings();
+    const title = mod.frontmatter?.title ?? headings.find((h) => h.depth === 1)?.text ?? slug;
+    return { slug, title };
+  })
+  .sort((a, b) => a.title.localeCompare(b.title));
+---
+
+<Layout title="Docs — aepbase">
+  <Nav alwaysVisible />
+  <main class="docs-main">
+    <div class="docs-shell">
+      <article class="docs-article">
+        <h1>Documentation</h1>
+        <p>Guides and reference for using aepbase.</p>
+        <ul class="docs-index-list">
+          {docs.map((d) => (
+            <li>
+              <a href={`/docs/${d.slug}`}>{d.title}</a>
+            </li>
+          ))}
+        </ul>
+      </article>
+    </div>
+  </main>
+</Layout>
