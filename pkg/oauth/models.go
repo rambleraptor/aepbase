@@ -1,24 +1,20 @@
 package oauth
 
-// Provider is the per-provider configuration the library consumer supplies
-// via State.EnableOAuth. URLs and credentials are not read from environment
-// variables by the library — the consumer is responsible for sourcing them.
+// Provider is the per-provider configuration supplied via State.EnableOAuth.
+// The library reads nothing from the environment.
 type Provider struct {
-	// Name appears in the callback URL (/oauth/{name}/callback) and as the
-	// provider key in the _oauth_identities table. Must be non-empty.
+	// Name appears in the callback URL: /oauth/{Name}/callback.
 	Name string
 
 	ClientID     string
 	ClientSecret string
 
-	// RedirectURL is the URL registered with the provider. It must resolve
-	// to /oauth/{Name}/callback on this server.
+	// RedirectURL must resolve to /oauth/{Name}/callback on this server
+	// and match what was registered with the provider.
 	RedirectURL string
 
-	// SuccessRedirectURL is where the user is sent after a successful
-	// callback. The minted token is appended in the URL fragment as
-	// #token=...&state=... (fragments are not sent to servers, so the
-	// token does not appear in access logs).
+	// SuccessRedirectURL receives the minted token in the URL fragment
+	// (#token=...&state=...) so it never appears in access logs.
 	SuccessRedirectURL string
 
 	Scopes []string
@@ -27,17 +23,12 @@ type Provider struct {
 	TokenURL    string
 	UserInfoURL string
 
-	// AllowRegistration controls whether the callback may create a new
-	// _users row when the provider's userinfo has no matching identity
-	// and no matching email. When false (the default), the callback
-	// only signs in users that already exist locally, either via a
-	// previously linked identity or via email match (auto-link). This
-	// is the safer default for deployments that gate account creation.
+	// AllowRegistration permits the callback to create a new _users row
+	// when neither identity nor email matches an existing account.
 	AllowRegistration bool
 }
 
-// Identity is a row in _oauth_identities — a link between a provider's
-// user ID and a local _users row.
+// Identity links a provider's user ID to a local _users row.
 type Identity struct {
 	Provider       string
 	ProviderUserID string

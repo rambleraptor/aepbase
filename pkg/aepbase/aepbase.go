@@ -75,10 +75,7 @@ type State struct {
 	// User support (library-only, opt-in, off by default). When usersEnabled
 	// is true, all requests (except login) require a valid auth token.
 	usersEnabled bool
-	// OAuth support (library-only, opt-in, off by default). When oauthEnabled
-	// is true, the /oauth/{provider}/callback route is registered for each
-	// configured provider.
-	oauthEnabled   bool
+	// OAuth providers. Non-empty means OAuth is enabled.
 	oauthProviders map[string]oauth.Provider
 	// middlewares are user-registered wrappers run on every request, in
 	// registration order (first registered is outermost).
@@ -273,39 +270,14 @@ func (s *State) UsersEnabled() bool {
 	return s.usersEnabled
 }
 
-// EnableOAuth registers OAuth providers and exposes the
-// GET /oauth/{provider}/callback route. Requires EnableUsers to be called
-// first, since OAuth identities link to _users rows and the minted bearer
-// token is the same one the user middleware validates.
-//
-// Provider credentials and URLs are supplied by the caller — the library
-// reads nothing from the environment. The callback signs in users that
-// already exist locally (matched by previously-linked identity or, as a
-// fallback, by email — auto-linking on the first OAuth login) and 302s
-// to Provider.SuccessRedirectURL with the token in the URL fragment as
-// #token=...&state=... — fragments are not sent to servers, so the
-// token does not appear in access logs. CSRF state verification is the
-// consumer's responsibility: the state parameter is passed through
-// transparently from the callback query to the fragment.
-//
-// New account creation is gated by Provider.AllowRegistration (default
-// false). When false, a callback that resolves to neither a linked
-// identity nor an email match returns 403; the user must already exist
-// locally. When true, the callback creates a new _users row.
-//
-// Calling EnableOAuth multiple times adds providers; existing providers
-// with the same Name are overwritten.
+// EnableOAuth registers OAuth providers and exposes
+// GET /oauth/{provider}/callback. Requires EnableUsers first. Same-named
+// providers from later calls overwrite earlier ones.
 func (s *State) EnableOAuth(providers ...oauth.Provider) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.usersEnabled {
 		return fmt.Errorf("EnableOAuth requires EnableUsers to be called first")
-	}
-	if err := oauth.CreateOAuthIdentitiesTable(s.DB); err != nil {
-		return fmt.Errorf("creating oauth_identities table: %w", err)
-	}
-	if s.oauthProviders == nil {
-		s.oauthProviders = make(map[string]oauth.Provider)
 	}
 	for _, p := range providers {
 		if p.Name == "" {
@@ -320,18 +292,25 @@ func (s *State) EnableOAuth(providers ...oauth.Provider) error {
 		if p.RedirectURL == "" || p.SuccessRedirectURL == "" {
 			return fmt.Errorf("oauth provider %q: RedirectURL and SuccessRedirectURL are required", p.Name)
 		}
+	}
+	if err := oauth.CreateOAuthIdentitiesTable(s.DB); err != nil {
+		return fmt.Errorf("creating oauth_identities table: %w", err)
+	}
+	if s.oauthProviders == nil {
+		s.oauthProviders = make(map[string]oauth.Provider)
+	}
+	for _, p := range providers {
 		s.oauthProviders[p.Name] = p
 	}
-	s.oauthEnabled = true
 	s.rebuildMux()
 	return nil
 }
 
-// OAuthEnabled reports whether OAuth support is turned on.
+// OAuthEnabled reports whether any OAuth providers are configured.
 func (s *State) OAuthEnabled() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.oauthEnabled
+	return len(s.oauthProviders) > 0
 }
 
 // createBootstrapUser inserts the initial superuser into the database.
@@ -725,8 +704,7 @@ func (s *State) rebuildMux() {
 	if s.usersEnabled {
 		user.RegisterRoutes(mux, s.DB)
 	}
-	// Register OAuth callback routes if OAuth is enabled.
-	if s.oauthEnabled {
+	if len(s.oauthProviders) > 0 {
 		oauth.RegisterRoutes(mux, s.DB, s.oauthProviders)
 	}
 	for _, r := range s.API.Resources {

@@ -14,12 +14,12 @@ import (
 	"github.com/rambleraptor/aepbase/pkg/user"
 )
 
-// noPasswordSentinel is stored in _users.password_hash for OAuth-only users.
-// It is not a valid bcrypt hash, so password login attempts always fail.
+// noPasswordSentinel is an invalid bcrypt hash; password login always fails
+// for OAuth-only users.
 const noPasswordSentinel = "!"
 
-// ErrRegistrationDisabled is returned when a callback would need to create a
-// new local user but the provider has AllowRegistration set to false.
+// ErrRegistrationDisabled is returned when AllowRegistration is false and no
+// existing user matches the provider's identity or email.
 var ErrRegistrationDisabled = errors.New("registration disabled for this provider")
 
 func RegisterRoutes(mux *http.ServeMux, d *sql.DB, providers map[string]Provider) {

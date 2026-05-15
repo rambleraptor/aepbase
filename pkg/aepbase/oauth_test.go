@@ -15,7 +15,7 @@ import (
 )
 
 // mockProvider stands in for an external OAuth provider's token and userinfo
-// endpoints. Tests can mutate its response fields to simulate variations.
+// endpoints.
 type mockProvider struct {
 	server         *httptest.Server
 	tokenResponse  string
@@ -62,8 +62,6 @@ func (mp *mockProvider) provider(name string) oauth.Provider {
 	}
 }
 
-// providerAllowingRegistration is provider() with AllowRegistration=true,
-// for tests that exercise the create-new-user path.
 func (mp *mockProvider) providerAllowingRegistration(name string) oauth.Provider {
 	p := mp.provider(name)
 	p.AllowRegistration = true
@@ -89,7 +87,6 @@ func newTestStateWithOAuth(t *testing.T, providers ...oauth.Provider) (*aepbase.
 	return state, state.Handler()
 }
 
-// tokenFromFragment extracts ?token=… from a URL fragment (after #).
 func tokenFromFragment(t *testing.T, location string) string {
 	t.Helper()
 	idx := strings.Index(location, "#")
@@ -166,11 +163,8 @@ func TestOAuthRouteRegisteredWhenEnabled(t *testing.T) {
 	if !state.OAuthEnabled() {
 		t.Fatal("OAuthEnabled should be true after EnableOAuth")
 	}
-	// Hitting the path with no code reaches the handler (400), not the mux's 404.
+	// No code: handler returns 400, not the mux's 404.
 	resp := doRequest(t, h, "GET", "/oauth/google/callback", "")
-	if resp.StatusCode == http.StatusNotFound {
-		t.Fatalf("expected handler registered, got 404")
-	}
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("expected 400 for missing code, got %d", resp.StatusCode)
 	}
@@ -185,7 +179,6 @@ func TestOAuthMultipleProviders(t *testing.T) {
 			t.Fatalf("provider %q: expected route registered, got 404", name)
 		}
 	}
-	// Unknown provider name → handler returns 404 with JSON body.
 	resp := doRequest(t, h, "GET", "/oauth/notconfigured/callback?code=x", "")
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("unknown provider: expected 404, got %d", resp.StatusCode)
@@ -199,8 +192,6 @@ func TestOAuthMultipleProviders(t *testing.T) {
 func TestOAuthCallbackExemptFromAuth(t *testing.T) {
 	mp := newMockProvider(t)
 	_, h := newTestStateWithOAuth(t, mp.provider("google"))
-	// No Authorization header. Auth middleware must let the request through;
-	// only the handler's own logic should respond.
 	resp := doAuthRequest(t, h, "GET", "/oauth/google/callback?code=abc", "", "")
 	if resp.StatusCode == http.StatusUnauthorized {
 		t.Fatalf("callback should be exempt from auth, got 401")
@@ -252,7 +243,6 @@ func TestOAuthCallbackReturningUser(t *testing.T) {
 		t.Fatalf("second callback: expected 302, got %d", resp.StatusCode)
 	}
 
-	// Bootstrap admin + alice = 2. No duplicates from the second callback.
 	n, err := user.CountUsers(state.GetDB())
 	if err != nil {
 		t.Fatalf("count: %v", err)
@@ -299,7 +289,6 @@ func TestOAuthAutoLinkByEmail(t *testing.T) {
 		t.Errorf("expected existing display name preserved, got %q", u.DisplayName)
 	}
 
-	// Bootstrap admin + alice-existing = 2. No new row.
 	n, _ := user.CountUsers(d)
 	if n != 2 {
 		t.Fatalf("expected 2 users, got %d", n)
@@ -334,8 +323,8 @@ func TestOAuthMintedTokenUsableAsBearer(t *testing.T) {
 	}
 	token := tokenFromFragment(t, resp.Header.Get("Location"))
 
-	// /users requires superuser. Alice is regular, so a working token gets
-	// 403 (authenticated but unauthorized) — never 401.
+	// /users requires superuser; alice is regular. 403 means the token
+	// authenticated successfully — a 401 would mean it was rejected.
 	resp2 := doAuthRequest(t, h, "GET", "/users", "", token)
 	if resp2.StatusCode == http.StatusUnauthorized {
 		t.Fatalf("minted token rejected as invalid (401)")
@@ -347,7 +336,6 @@ func TestOAuthMintedTokenUsableAsBearer(t *testing.T) {
 
 func TestOAuthRegistrationDisabledRejectsNewUser(t *testing.T) {
 	mp := newMockProvider(t)
-	// AllowRegistration is false by default — no matching identity, no matching email.
 	state, h := newTestStateWithOAuth(t, mp.provider("google"))
 
 	resp := doRequest(t, h, "GET", "/oauth/google/callback?code=abc", "")
@@ -356,19 +344,17 @@ func TestOAuthRegistrationDisabledRejectsNewUser(t *testing.T) {
 		t.Fatalf("expected 403, got %d: %s", resp.StatusCode, body)
 	}
 
-	// No user should have been created. Only the bootstrap admin exists.
 	n, err := user.CountUsers(state.GetDB())
 	if err != nil {
 		t.Fatalf("count: %v", err)
 	}
 	if n != 1 {
-		t.Fatalf("expected 1 user (bootstrap admin only), got %d", n)
+		t.Fatalf("expected only bootstrap admin, got %d users", n)
 	}
 }
 
 func TestOAuthRegistrationDisabledStillAllowsLinking(t *testing.T) {
 	mp := newMockProvider(t)
-	// AllowRegistration is false, but an account with the OAuth email already exists.
 	state, h := newTestStateWithOAuth(t, mp.provider("google"))
 
 	d := state.GetDB()
@@ -389,7 +375,6 @@ func TestOAuthRegistrationDisabledStillAllowsLinking(t *testing.T) {
 		t.Fatalf("insert: %v", err)
 	}
 
-	// Linking to an existing account is permitted even with registration off.
 	resp := doRequest(t, h, "GET", "/oauth/google/callback?code=abc", "")
 	if resp.StatusCode != http.StatusFound {
 		body, _ := io.ReadAll(resp.Body)
@@ -401,7 +386,7 @@ func TestOAuthRegistrationDisabledStillAllowsLinking(t *testing.T) {
 		t.Fatalf("expected linked to alice-existing, got %+v", u)
 	}
 
-	// And a second callback with the same provider+sub still works (now via identity, not email).
+	// Second callback now resolves via identity, not email.
 	resp2 := doRequest(t, h, "GET", "/oauth/google/callback?code=def", "")
 	if resp2.StatusCode != http.StatusFound {
 		t.Fatalf("returning user via identity: expected 302, got %d", resp2.StatusCode)
@@ -416,8 +401,8 @@ func TestOAuthOnlyUserCannotPasswordLogin(t *testing.T) {
 		t.Fatalf("callback: expected 302, got %d", resp.StatusCode)
 	}
 
-	// The sentinel password_hash is "!", which is not a valid bcrypt hash.
-	// No password attempt — including the sentinel itself — should succeed.
+	// The sentinel "!" isn't a valid bcrypt hash, so no password attempt
+	// — including the sentinel itself — can succeed.
 	for _, pw := range []string{"", "!", "alice-pw", "password"} {
 		body := fmt.Sprintf(`{"email":"alice@example.com","password":%q}`, pw)
 		resp := doAuthRequest(t, h, "POST", "/users/:login", body, "")
