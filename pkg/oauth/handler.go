@@ -3,6 +3,7 @@ package oauth
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,6 +17,10 @@ import (
 // noPasswordSentinel is stored in _users.password_hash for OAuth-only users.
 // It is not a valid bcrypt hash, so password login attempts always fail.
 const noPasswordSentinel = "!"
+
+// ErrRegistrationDisabled is returned when a callback would need to create a
+// new local user but the provider has AllowRegistration set to false.
+var ErrRegistrationDisabled = errors.New("registration disabled for this provider")
 
 func RegisterRoutes(mux *http.ServeMux, d *sql.DB, providers map[string]Provider) {
 	mux.HandleFunc("GET /oauth/{provider}/callback", makeCallbackHandler(d, providers))
@@ -59,7 +64,11 @@ func makeCallbackHandler(d *sql.DB, providers map[string]Provider) http.HandlerF
 			return
 		}
 
-		u, err := findOrCreateUser(d, provider.Name, info)
+		u, err := findOrCreateUser(d, provider, info)
+		if errors.Is(err, ErrRegistrationDisabled) {
+			writeError(w, http.StatusForbidden, "registration is not enabled for this provider; the email is not linked to an existing account")
+			return
+		}
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, fmt.Sprintf("user lookup failed: %v", err))
 			return
@@ -158,8 +167,8 @@ func fetchUserInfo(p Provider, accessToken string) (*userInfo, error) {
 	return &info, nil
 }
 
-func findOrCreateUser(d *sql.DB, providerName string, info *userInfo) (*user.User, error) {
-	ident, err := GetIdentity(d, providerName, info.Sub)
+func findOrCreateUser(d *sql.DB, p Provider, info *userInfo) (*user.User, error) {
+	ident, err := GetIdentity(d, p.Name, info.Sub)
 	if err != nil {
 		return nil, fmt.Errorf("get identity: %w", err)
 	}
@@ -182,7 +191,7 @@ func findOrCreateUser(d *sql.DB, providerName string, info *userInfo) (*user.Use
 	}
 	if existing != nil {
 		if err := InsertIdentity(d, &Identity{
-			Provider:       providerName,
+			Provider:       p.Name,
 			ProviderUserID: info.Sub,
 			UserID:         existing.ID,
 			Email:          info.Email,
@@ -191,6 +200,10 @@ func findOrCreateUser(d *sql.DB, providerName string, info *userInfo) (*user.Use
 			return nil, fmt.Errorf("link identity: %w", err)
 		}
 		return existing, nil
+	}
+
+	if !p.AllowRegistration {
+		return nil, ErrRegistrationDisabled
 	}
 
 	id := user.GenerateID()
@@ -207,7 +220,7 @@ func findOrCreateUser(d *sql.DB, providerName string, info *userInfo) (*user.Use
 		return nil, fmt.Errorf("insert user: %w", err)
 	}
 	if err := InsertIdentity(d, &Identity{
-		Provider:       providerName,
+		Provider:       p.Name,
 		ProviderUserID: info.Sub,
 		UserID:         u.ID,
 		Email:          info.Email,

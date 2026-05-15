@@ -26,6 +26,14 @@ type Provider struct {
 	AuthURL     string
 	TokenURL    string
 	UserInfoURL string
+
+	// AllowRegistration controls whether the callback may create a new
+	// _users row when the provider's userinfo has no matching identity
+	// and no matching email. When false (the default), the callback
+	// only signs in users that already exist locally, either via a
+	// previously linked identity or via email match (auto-link). This
+	// is the safer default for deployments that gate account creation.
+	AllowRegistration bool
 }
 
 // Identity is a row in _oauth_identities — a link between a provider's

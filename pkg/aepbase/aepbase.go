@@ -279,13 +279,19 @@ func (s *State) UsersEnabled() bool {
 // token is the same one the user middleware validates.
 //
 // Provider credentials and URLs are supplied by the caller — the library
-// reads nothing from the environment. The callback finds-or-creates a
-// user (auto-linking by email when a matching account already exists)
-// and 302s to Provider.SuccessRedirectURL with the token in the URL
-// fragment as #token=...&state=... — fragments are not sent to servers,
-// so the token does not appear in access logs. CSRF state verification
-// is the consumer's responsibility: the state parameter is passed
-// through transparently from the callback query to the fragment.
+// reads nothing from the environment. The callback signs in users that
+// already exist locally (matched by previously-linked identity or, as a
+// fallback, by email — auto-linking on the first OAuth login) and 302s
+// to Provider.SuccessRedirectURL with the token in the URL fragment as
+// #token=...&state=... — fragments are not sent to servers, so the
+// token does not appear in access logs. CSRF state verification is the
+// consumer's responsibility: the state parameter is passed through
+// transparently from the callback query to the fragment.
+//
+// New account creation is gated by Provider.AllowRegistration (default
+// false). When false, a callback that resolves to neither a linked
+// identity nor an email match returns 403; the user must already exist
+// locally. When true, the callback creates a new _users row.
 //
 // Calling EnableOAuth multiple times adds providers; existing providers
 // with the same Name are overwritten.

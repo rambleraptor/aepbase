@@ -62,6 +62,14 @@ func (mp *mockProvider) provider(name string) oauth.Provider {
 	}
 }
 
+// providerAllowingRegistration is provider() with AllowRegistration=true,
+// for tests that exercise the create-new-user path.
+func (mp *mockProvider) providerAllowingRegistration(name string) oauth.Provider {
+	p := mp.provider(name)
+	p.AllowRegistration = true
+	return p
+}
+
 func newTestStateWithOAuth(t *testing.T, providers ...oauth.Provider) (*aepbase.State, http.Handler) {
 	t.Helper()
 	d, err := db.Init(":memory:")
@@ -203,7 +211,7 @@ func TestOAuthCallbackExemptFromAuth(t *testing.T) {
 
 func TestOAuthCallbackCreatesNewUser(t *testing.T) {
 	mp := newMockProvider(t)
-	state, h := newTestStateWithOAuth(t, mp.provider("google"))
+	state, h := newTestStateWithOAuth(t, mp.providerAllowingRegistration("google"))
 
 	resp := doRequest(t, h, "GET", "/oauth/google/callback?code=abc&state=xyz", "")
 	if resp.StatusCode != http.StatusFound {
@@ -235,7 +243,7 @@ func TestOAuthCallbackCreatesNewUser(t *testing.T) {
 
 func TestOAuthCallbackReturningUser(t *testing.T) {
 	mp := newMockProvider(t)
-	state, h := newTestStateWithOAuth(t, mp.provider("google"))
+	state, h := newTestStateWithOAuth(t, mp.providerAllowingRegistration("google"))
 
 	if resp := doRequest(t, h, "GET", "/oauth/google/callback?code=abc", ""); resp.StatusCode != http.StatusFound {
 		t.Fatalf("first callback: expected 302, got %d", resp.StatusCode)
@@ -300,7 +308,7 @@ func TestOAuthAutoLinkByEmail(t *testing.T) {
 
 func TestOAuthStatePassThrough(t *testing.T) {
 	mp := newMockProvider(t)
-	_, h := newTestStateWithOAuth(t, mp.provider("google"))
+	_, h := newTestStateWithOAuth(t, mp.providerAllowingRegistration("google"))
 
 	resp := doRequest(t, h, "GET", "/oauth/google/callback?code=abc&state=my-csrf-token", "")
 	if resp.StatusCode != http.StatusFound {
@@ -318,7 +326,7 @@ func TestOAuthStatePassThrough(t *testing.T) {
 
 func TestOAuthMintedTokenUsableAsBearer(t *testing.T) {
 	mp := newMockProvider(t)
-	_, h := newTestStateWithOAuth(t, mp.provider("google"))
+	_, h := newTestStateWithOAuth(t, mp.providerAllowingRegistration("google"))
 
 	resp := doRequest(t, h, "GET", "/oauth/google/callback?code=abc", "")
 	if resp.StatusCode != http.StatusFound {
@@ -337,9 +345,72 @@ func TestOAuthMintedTokenUsableAsBearer(t *testing.T) {
 	}
 }
 
+func TestOAuthRegistrationDisabledRejectsNewUser(t *testing.T) {
+	mp := newMockProvider(t)
+	// AllowRegistration is false by default — no matching identity, no matching email.
+	state, h := newTestStateWithOAuth(t, mp.provider("google"))
+
+	resp := doRequest(t, h, "GET", "/oauth/google/callback?code=abc", "")
+	if resp.StatusCode != http.StatusForbidden {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 403, got %d: %s", resp.StatusCode, body)
+	}
+
+	// No user should have been created. Only the bootstrap admin exists.
+	n, err := user.CountUsers(state.GetDB())
+	if err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("expected 1 user (bootstrap admin only), got %d", n)
+	}
+}
+
+func TestOAuthRegistrationDisabledStillAllowsLinking(t *testing.T) {
+	mp := newMockProvider(t)
+	// AllowRegistration is false, but an account with the OAuth email already exists.
+	state, h := newTestStateWithOAuth(t, mp.provider("google"))
+
+	d := state.GetDB()
+	hash, err := user.HashPassword("alice-pw")
+	if err != nil {
+		t.Fatalf("hash: %v", err)
+	}
+	existing := &user.User{
+		ID:          "alice-existing",
+		Path:        "users/alice-existing",
+		Email:       "alice@example.com",
+		DisplayName: "Alice",
+		Type:        user.TypeRegular,
+		CreateTime:  "2024-01-01T00:00:00Z",
+		UpdateTime:  "2024-01-01T00:00:00Z",
+	}
+	if err := user.InsertUser(d, existing, hash); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	// Linking to an existing account is permitted even with registration off.
+	resp := doRequest(t, h, "GET", "/oauth/google/callback?code=abc", "")
+	if resp.StatusCode != http.StatusFound {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 302 (link to existing user), got %d: %s", resp.StatusCode, body)
+	}
+
+	u, _, _ := user.GetUserByEmail(d, "alice@example.com")
+	if u == nil || u.ID != "alice-existing" {
+		t.Fatalf("expected linked to alice-existing, got %+v", u)
+	}
+
+	// And a second callback with the same provider+sub still works (now via identity, not email).
+	resp2 := doRequest(t, h, "GET", "/oauth/google/callback?code=def", "")
+	if resp2.StatusCode != http.StatusFound {
+		t.Fatalf("returning user via identity: expected 302, got %d", resp2.StatusCode)
+	}
+}
+
 func TestOAuthOnlyUserCannotPasswordLogin(t *testing.T) {
 	mp := newMockProvider(t)
-	_, h := newTestStateWithOAuth(t, mp.provider("google"))
+	_, h := newTestStateWithOAuth(t, mp.providerAllowingRegistration("google"))
 
 	if resp := doRequest(t, h, "GET", "/oauth/google/callback?code=abc", ""); resp.StatusCode != http.StatusFound {
 		t.Fatalf("callback: expected 302, got %d", resp.StatusCode)
