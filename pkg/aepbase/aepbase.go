@@ -286,8 +286,8 @@ func (s *State) EnableOAuth(providers ...oauth.Provider) error {
 		if p.ClientID == "" || p.ClientSecret == "" {
 			return fmt.Errorf("oauth provider %q: ClientID and ClientSecret are required", p.Name)
 		}
-		if p.AuthURL == "" || p.TokenURL == "" || p.UserInfoURL == "" {
-			return fmt.Errorf("oauth provider %q: AuthURL, TokenURL, and UserInfoURL are required", p.Name)
+		if p.TokenURL == "" || p.UserInfoURL == "" {
+			return fmt.Errorf("oauth provider %q: TokenURL and UserInfoURL are required", p.Name)
 		}
 		if p.RedirectURL == "" || p.SuccessRedirectURL == "" {
 			return fmt.Errorf("oauth provider %q: RedirectURL and SuccessRedirectURL are required", p.Name)

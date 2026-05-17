@@ -55,8 +55,6 @@ func (mp *mockProvider) provider(name string) oauth.Provider {
 		ClientSecret:       "fake-secret",
 		RedirectURL:        "http://localhost:8080/oauth/" + name + "/callback",
 		SuccessRedirectURL: "http://app.example.com/auth/done",
-		Scopes:             []string{"openid", "email"},
-		AuthURL:            mp.server.URL + "/auth",
 		TokenURL:           mp.server.URL + "/token",
 		UserInfoURL:        mp.server.URL + "/userinfo",
 	}
@@ -126,7 +124,6 @@ func TestEnableOAuthValidatesFields(t *testing.T) {
 		{"empty name", func(p *oauth.Provider) { p.Name = "" }, "Name is required"},
 		{"empty client id", func(p *oauth.Provider) { p.ClientID = "" }, "ClientID"},
 		{"empty client secret", func(p *oauth.Provider) { p.ClientSecret = "" }, "ClientSecret"},
-		{"empty auth url", func(p *oauth.Provider) { p.AuthURL = "" }, "AuthURL"},
 		{"empty token url", func(p *oauth.Provider) { p.TokenURL = "" }, "TokenURL"},
 		{"empty userinfo url", func(p *oauth.Provider) { p.UserInfoURL = "" }, "UserInfoURL"},
 		{"empty redirect url", func(p *oauth.Provider) { p.RedirectURL = "" }, "RedirectURL"},

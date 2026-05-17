@@ -17,9 +17,6 @@ type Provider struct {
 	// (#token=...&state=...) so it never appears in access logs.
 	SuccessRedirectURL string
 
-	Scopes []string
-
-	AuthURL     string
 	TokenURL    string
 	UserInfoURL string
 
