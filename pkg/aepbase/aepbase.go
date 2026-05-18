@@ -17,6 +17,7 @@ import (
 
 	"github.com/rambleraptor/aepbase/pkg/db"
 	"github.com/rambleraptor/aepbase/pkg/meta"
+	"github.com/rambleraptor/aepbase/pkg/oauth"
 	"github.com/rambleraptor/aepbase/pkg/operation"
 	"github.com/rambleraptor/aepbase/pkg/resource"
 	"github.com/rambleraptor/aepbase/pkg/user"
@@ -74,6 +75,8 @@ type State struct {
 	// User support (library-only, opt-in, off by default). When usersEnabled
 	// is true, all requests (except login) require a valid auth token.
 	usersEnabled bool
+	// OAuth providers. Non-empty means OAuth is enabled.
+	oauthProviders map[string]oauth.Provider
 	// middlewares are user-registered wrappers run on every request, in
 	// registration order (first registered is outermost).
 	middlewares []Middleware
@@ -265,6 +268,49 @@ func (s *State) UsersEnabled() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.usersEnabled
+}
+
+// EnableOAuth registers OAuth providers and exposes
+// GET /oauth/{provider}/callback. Requires EnableUsers first. Same-named
+// providers from later calls overwrite earlier ones.
+func (s *State) EnableOAuth(providers ...oauth.Provider) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.usersEnabled {
+		return fmt.Errorf("EnableOAuth requires EnableUsers to be called first")
+	}
+	for _, p := range providers {
+		if p.Name == "" {
+			return fmt.Errorf("oauth provider: Name is required")
+		}
+		if p.ClientID == "" || p.ClientSecret == "" {
+			return fmt.Errorf("oauth provider %q: ClientID and ClientSecret are required", p.Name)
+		}
+		if p.AuthURL == "" || p.TokenURL == "" || p.UserInfoURL == "" {
+			return fmt.Errorf("oauth provider %q: AuthURL, TokenURL, and UserInfoURL are required", p.Name)
+		}
+		if p.RedirectURL == "" || p.SuccessRedirectURL == "" {
+			return fmt.Errorf("oauth provider %q: RedirectURL and SuccessRedirectURL are required", p.Name)
+		}
+	}
+	if err := oauth.CreateOAuthIdentitiesTable(s.DB); err != nil {
+		return fmt.Errorf("creating oauth_identities table: %w", err)
+	}
+	if s.oauthProviders == nil {
+		s.oauthProviders = make(map[string]oauth.Provider)
+	}
+	for _, p := range providers {
+		s.oauthProviders[p.Name] = p
+	}
+	s.rebuildMux()
+	return nil
+}
+
+// OAuthEnabled reports whether any OAuth providers are configured.
+func (s *State) OAuthEnabled() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.oauthProviders) > 0
 }
 
 // createBootstrapUser inserts the initial superuser into the database.
@@ -657,6 +703,9 @@ func (s *State) rebuildMux() {
 	// Register user routes if users are enabled.
 	if s.usersEnabled {
 		user.RegisterRoutes(mux, s.DB)
+	}
+	if len(s.oauthProviders) > 0 {
+		oauth.RegisterRoutes(mux, s.DB, s.oauthProviders)
 	}
 	for _, r := range s.API.Resources {
 		// Skip built-in resources — their routes are registered separately above.
