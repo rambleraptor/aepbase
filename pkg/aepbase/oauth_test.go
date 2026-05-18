@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -55,6 +56,8 @@ func (mp *mockProvider) provider(name string) oauth.Provider {
 		ClientSecret:       "fake-secret",
 		RedirectURL:        "http://localhost:8080/oauth/" + name + "/callback",
 		SuccessRedirectURL: "http://app.example.com/auth/done",
+		Scopes:             []string{"openid", "email"},
+		AuthURL:            mp.server.URL + "/authorize",
 		TokenURL:           mp.server.URL + "/token",
 		UserInfoURL:        mp.server.URL + "/userinfo",
 	}
@@ -83,6 +86,47 @@ func newTestStateWithOAuth(t *testing.T, providers ...oauth.Provider) (*aepbase.
 		}
 	}
 	return state, state.Handler()
+}
+
+// startFlow does GET /oauth/{provider}/start and returns the state cookie
+// the server set plus the state value it included in the authorize URL.
+func startFlow(t *testing.T, h http.Handler, providerName string) (*http.Cookie, string) {
+	t.Helper()
+	resp := doRequest(t, h, "GET", "/oauth/"+providerName+"/start", "")
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("/start: expected 302, got %d", resp.StatusCode)
+	}
+	var cookie *http.Cookie
+	for _, c := range resp.Cookies() {
+		if c.Name == "aepbase_oauth_state" {
+			cookie = c
+		}
+	}
+	if cookie == nil {
+		t.Fatal("/start: state cookie not set")
+	}
+	loc, err := url.Parse(resp.Header.Get("Location"))
+	if err != nil {
+		t.Fatalf("parsing redirect: %v", err)
+	}
+	state := loc.Query().Get("state")
+	if state == "" {
+		t.Fatal("/start: state query missing from redirect")
+	}
+	return cookie, state
+}
+
+// doCallback issues GET /oauth/{provider}/callback with the supplied cookie
+// attached (nil to omit).
+func doCallback(t *testing.T, h http.Handler, providerName, code, state string, cookie *http.Cookie) *http.Response {
+	t.Helper()
+	req := httptest.NewRequest("GET", "/oauth/"+providerName+"/callback?code="+code+"&state="+state, nil)
+	if cookie != nil {
+		req.AddCookie(cookie)
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	return w.Result()
 }
 
 func tokenFromFragment(t *testing.T, location string) string {
@@ -124,6 +168,7 @@ func TestEnableOAuthValidatesFields(t *testing.T) {
 		{"empty name", func(p *oauth.Provider) { p.Name = "" }, "Name is required"},
 		{"empty client id", func(p *oauth.Provider) { p.ClientID = "" }, "ClientID"},
 		{"empty client secret", func(p *oauth.Provider) { p.ClientSecret = "" }, "ClientSecret"},
+		{"empty auth url", func(p *oauth.Provider) { p.AuthURL = "" }, "AuthURL"},
 		{"empty token url", func(p *oauth.Provider) { p.TokenURL = "" }, "TokenURL"},
 		{"empty userinfo url", func(p *oauth.Provider) { p.UserInfoURL = "" }, "UserInfoURL"},
 		{"empty redirect url", func(p *oauth.Provider) { p.RedirectURL = "" }, "RedirectURL"},
@@ -148,9 +193,11 @@ func TestOAuthRoutesNotRegisteredWhenDisabled(t *testing.T) {
 	if state.OAuthEnabled() {
 		t.Fatal("OAuth should be disabled by default")
 	}
-	resp := doRequest(t, h, "GET", "/oauth/google/callback?code=x", "")
-	if resp.StatusCode != http.StatusNotFound {
-		t.Fatalf("expected 404 (no route registered), got %d", resp.StatusCode)
+	for _, path := range []string{"/oauth/google/start", "/oauth/google/callback?code=x"} {
+		resp := doRequest(t, h, "GET", path, "")
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("%s: expected 404 (no route registered), got %d", path, resp.StatusCode)
+		}
 	}
 }
 
@@ -171,12 +218,12 @@ func TestOAuthMultipleProviders(t *testing.T) {
 	mp := newMockProvider(t)
 	_, h := newTestStateWithOAuth(t, mp.provider("google"), mp.provider("github"))
 	for _, name := range []string{"google", "github"} {
-		resp := doRequest(t, h, "GET", "/oauth/"+name+"/callback", "")
-		if resp.StatusCode == http.StatusNotFound {
-			t.Fatalf("provider %q: expected route registered, got 404", name)
+		resp := doRequest(t, h, "GET", "/oauth/"+name+"/start", "")
+		if resp.StatusCode != http.StatusFound {
+			t.Fatalf("provider %q: expected /start 302, got %d", name, resp.StatusCode)
 		}
 	}
-	resp := doRequest(t, h, "GET", "/oauth/notconfigured/callback?code=x", "")
+	resp := doRequest(t, h, "GET", "/oauth/notconfigured/start", "")
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("unknown provider: expected 404, got %d", resp.StatusCode)
 	}
@@ -186,12 +233,57 @@ func TestOAuthMultipleProviders(t *testing.T) {
 	}
 }
 
-func TestOAuthCallbackExemptFromAuth(t *testing.T) {
+func TestOAuthRoutesExemptFromAuth(t *testing.T) {
 	mp := newMockProvider(t)
 	_, h := newTestStateWithOAuth(t, mp.provider("google"))
-	resp := doAuthRequest(t, h, "GET", "/oauth/google/callback?code=abc", "", "")
-	if resp.StatusCode == http.StatusUnauthorized {
-		t.Fatalf("callback should be exempt from auth, got 401")
+	for _, path := range []string{"/oauth/google/start", "/oauth/google/callback?code=abc"} {
+		resp := doAuthRequest(t, h, "GET", path, "", "")
+		if resp.StatusCode == http.StatusUnauthorized {
+			t.Fatalf("%s should be exempt from auth, got 401", path)
+		}
+	}
+}
+
+func TestOAuthStartRedirectsToProvider(t *testing.T) {
+	mp := newMockProvider(t)
+	_, h := newTestStateWithOAuth(t, mp.provider("google"))
+
+	cookie, state := startFlow(t, h, "google")
+	if state == "" || len(state) < 16 {
+		t.Fatalf("state value looks weak: %q", state)
+	}
+	if !cookie.HttpOnly || cookie.SameSite != http.SameSiteLaxMode || cookie.Path != "/oauth/" {
+		t.Fatalf("cookie attributes wrong: %+v", cookie)
+	}
+	if cookie.Value != state {
+		t.Fatalf("cookie value (%q) does not match state in redirect (%q)", cookie.Value, state)
+	}
+
+	// Hit /start again and verify a different state is generated.
+	_, state2 := startFlow(t, h, "google")
+	if state == state2 {
+		t.Fatal("expected fresh state on each /start, got the same value twice")
+	}
+}
+
+func TestOAuthCallbackRejectsMissingStateCookie(t *testing.T) {
+	mp := newMockProvider(t)
+	_, h := newTestStateWithOAuth(t, mp.provider("google"))
+
+	resp := doCallback(t, h, "google", "abc", "anything", nil)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for missing cookie, got %d", resp.StatusCode)
+	}
+}
+
+func TestOAuthCallbackRejectsStateMismatch(t *testing.T) {
+	mp := newMockProvider(t)
+	_, h := newTestStateWithOAuth(t, mp.provider("google"))
+
+	cookie, _ := startFlow(t, h, "google")
+	resp := doCallback(t, h, "google", "abc", "not-the-real-state", cookie)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for state mismatch, got %d", resp.StatusCode)
 	}
 }
 
@@ -199,9 +291,10 @@ func TestOAuthCallbackExemptFromAuth(t *testing.T) {
 
 func TestOAuthCallbackCreatesNewUser(t *testing.T) {
 	mp := newMockProvider(t)
-	state, h := newTestStateWithOAuth(t, mp.providerAllowingRegistration("google"))
+	st, h := newTestStateWithOAuth(t, mp.providerAllowingRegistration("google"))
 
-	resp := doRequest(t, h, "GET", "/oauth/google/callback?code=abc&state=xyz", "")
+	cookie, state := startFlow(t, h, "google")
+	resp := doCallback(t, h, "google", "abc", state, cookie)
 	if resp.StatusCode != http.StatusFound {
 		body, _ := io.ReadAll(resp.Body)
 		t.Fatalf("expected 302, got %d: %s", resp.StatusCode, body)
@@ -214,7 +307,7 @@ func TestOAuthCallbackCreatesNewUser(t *testing.T) {
 		t.Fatalf("expected token in fragment, got %q", loc)
 	}
 
-	u, _, err := user.GetUserByEmail(state.GetDB(), "alice@example.com")
+	u, _, err := user.GetUserByEmail(st.GetDB(), "alice@example.com")
 	if err != nil {
 		t.Fatalf("get user: %v", err)
 	}
@@ -231,16 +324,18 @@ func TestOAuthCallbackCreatesNewUser(t *testing.T) {
 
 func TestOAuthCallbackReturningUser(t *testing.T) {
 	mp := newMockProvider(t)
-	state, h := newTestStateWithOAuth(t, mp.providerAllowingRegistration("google"))
+	st, h := newTestStateWithOAuth(t, mp.providerAllowingRegistration("google"))
 
-	if resp := doRequest(t, h, "GET", "/oauth/google/callback?code=abc", ""); resp.StatusCode != http.StatusFound {
+	c1, s1 := startFlow(t, h, "google")
+	if resp := doCallback(t, h, "google", "abc", s1, c1); resp.StatusCode != http.StatusFound {
 		t.Fatalf("first callback: expected 302, got %d", resp.StatusCode)
 	}
-	if resp := doRequest(t, h, "GET", "/oauth/google/callback?code=def", ""); resp.StatusCode != http.StatusFound {
+	c2, s2 := startFlow(t, h, "google")
+	if resp := doCallback(t, h, "google", "def", s2, c2); resp.StatusCode != http.StatusFound {
 		t.Fatalf("second callback: expected 302, got %d", resp.StatusCode)
 	}
 
-	n, err := user.CountUsers(state.GetDB())
+	n, err := user.CountUsers(st.GetDB())
 	if err != nil {
 		t.Fatalf("count: %v", err)
 	}
@@ -251,9 +346,9 @@ func TestOAuthCallbackReturningUser(t *testing.T) {
 
 func TestOAuthAutoLinkByEmail(t *testing.T) {
 	mp := newMockProvider(t)
-	state, h := newTestStateWithOAuth(t, mp.provider("google"))
+	st, h := newTestStateWithOAuth(t, mp.provider("google"))
 
-	d := state.GetDB()
+	d := st.GetDB()
 	hash, err := user.HashPassword("alice-pw")
 	if err != nil {
 		t.Fatalf("hash: %v", err)
@@ -271,7 +366,8 @@ func TestOAuthAutoLinkByEmail(t *testing.T) {
 		t.Fatalf("insert password user: %v", err)
 	}
 
-	if resp := doRequest(t, h, "GET", "/oauth/google/callback?code=abc", ""); resp.StatusCode != http.StatusFound {
+	cookie, state := startFlow(t, h, "google")
+	if resp := doCallback(t, h, "google", "abc", state, cookie); resp.StatusCode != http.StatusFound {
 		t.Fatalf("callback: expected 302, got %d", resp.StatusCode)
 	}
 
@@ -292,29 +388,12 @@ func TestOAuthAutoLinkByEmail(t *testing.T) {
 	}
 }
 
-func TestOAuthStatePassThrough(t *testing.T) {
-	mp := newMockProvider(t)
-	_, h := newTestStateWithOAuth(t, mp.providerAllowingRegistration("google"))
-
-	resp := doRequest(t, h, "GET", "/oauth/google/callback?code=abc&state=my-csrf-token", "")
-	if resp.StatusCode != http.StatusFound {
-		t.Fatalf("expected 302, got %d", resp.StatusCode)
-	}
-	if loc := resp.Header.Get("Location"); !strings.Contains(loc, "state=my-csrf-token") {
-		t.Fatalf("state not passed through to fragment: %q", loc)
-	}
-
-	resp2 := doRequest(t, h, "GET", "/oauth/google/callback?code=abc", "")
-	if loc := resp2.Header.Get("Location"); strings.Contains(loc, "state=") {
-		t.Fatalf("no state expected in fragment when omitted, got %q", loc)
-	}
-}
-
 func TestOAuthMintedTokenUsableAsBearer(t *testing.T) {
 	mp := newMockProvider(t)
 	_, h := newTestStateWithOAuth(t, mp.providerAllowingRegistration("google"))
 
-	resp := doRequest(t, h, "GET", "/oauth/google/callback?code=abc", "")
+	cookie, state := startFlow(t, h, "google")
+	resp := doCallback(t, h, "google", "abc", state, cookie)
 	if resp.StatusCode != http.StatusFound {
 		t.Fatalf("callback: expected 302, got %d", resp.StatusCode)
 	}
@@ -333,15 +412,16 @@ func TestOAuthMintedTokenUsableAsBearer(t *testing.T) {
 
 func TestOAuthRegistrationDisabledRejectsNewUser(t *testing.T) {
 	mp := newMockProvider(t)
-	state, h := newTestStateWithOAuth(t, mp.provider("google"))
+	st, h := newTestStateWithOAuth(t, mp.provider("google"))
 
-	resp := doRequest(t, h, "GET", "/oauth/google/callback?code=abc", "")
+	cookie, state := startFlow(t, h, "google")
+	resp := doCallback(t, h, "google", "abc", state, cookie)
 	if resp.StatusCode != http.StatusForbidden {
 		body, _ := io.ReadAll(resp.Body)
 		t.Fatalf("expected 403, got %d: %s", resp.StatusCode, body)
 	}
 
-	n, err := user.CountUsers(state.GetDB())
+	n, err := user.CountUsers(st.GetDB())
 	if err != nil {
 		t.Fatalf("count: %v", err)
 	}
@@ -352,9 +432,9 @@ func TestOAuthRegistrationDisabledRejectsNewUser(t *testing.T) {
 
 func TestOAuthRegistrationDisabledStillAllowsLinking(t *testing.T) {
 	mp := newMockProvider(t)
-	state, h := newTestStateWithOAuth(t, mp.provider("google"))
+	st, h := newTestStateWithOAuth(t, mp.provider("google"))
 
-	d := state.GetDB()
+	d := st.GetDB()
 	hash, err := user.HashPassword("alice-pw")
 	if err != nil {
 		t.Fatalf("hash: %v", err)
@@ -372,7 +452,8 @@ func TestOAuthRegistrationDisabledStillAllowsLinking(t *testing.T) {
 		t.Fatalf("insert: %v", err)
 	}
 
-	resp := doRequest(t, h, "GET", "/oauth/google/callback?code=abc", "")
+	c1, s1 := startFlow(t, h, "google")
+	resp := doCallback(t, h, "google", "abc", s1, c1)
 	if resp.StatusCode != http.StatusFound {
 		body, _ := io.ReadAll(resp.Body)
 		t.Fatalf("expected 302 (link to existing user), got %d: %s", resp.StatusCode, body)
@@ -384,7 +465,8 @@ func TestOAuthRegistrationDisabledStillAllowsLinking(t *testing.T) {
 	}
 
 	// Second callback now resolves via identity, not email.
-	resp2 := doRequest(t, h, "GET", "/oauth/google/callback?code=def", "")
+	c2, s2 := startFlow(t, h, "google")
+	resp2 := doCallback(t, h, "google", "def", s2, c2)
 	if resp2.StatusCode != http.StatusFound {
 		t.Fatalf("returning user via identity: expected 302, got %d", resp2.StatusCode)
 	}
@@ -394,7 +476,8 @@ func TestOAuthOnlyUserCannotPasswordLogin(t *testing.T) {
 	mp := newMockProvider(t)
 	_, h := newTestStateWithOAuth(t, mp.providerAllowingRegistration("google"))
 
-	if resp := doRequest(t, h, "GET", "/oauth/google/callback?code=abc", ""); resp.StatusCode != http.StatusFound {
+	cookie, state := startFlow(t, h, "google")
+	if resp := doCallback(t, h, "google", "abc", state, cookie); resp.StatusCode != http.StatusFound {
 		t.Fatalf("callback: expected 302, got %d", resp.StatusCode)
 	}
 

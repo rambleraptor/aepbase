@@ -1,6 +1,7 @@
 package oauth
 
 import (
+	"crypto/subtle"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -18,12 +19,54 @@ import (
 // for OAuth-only users.
 const noPasswordSentinel = "!"
 
+// stateCookieName holds the CSRF state set by /start and verified by /callback.
+const stateCookieName = "aepbase_oauth_state"
+
 // ErrRegistrationDisabled is returned when AllowRegistration is false and no
 // existing user matches the provider's identity or email.
 var ErrRegistrationDisabled = errors.New("registration disabled for this provider")
 
 func RegisterRoutes(mux *http.ServeMux, d *sql.DB, providers map[string]Provider) {
+	mux.HandleFunc("GET /oauth/{provider}/start", makeStartHandler(providers))
 	mux.HandleFunc("GET /oauth/{provider}/callback", makeCallbackHandler(d, providers))
+}
+
+func makeStartHandler(providers map[string]Provider) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		name := r.PathValue("provider")
+		provider, ok := providers[name]
+		if !ok {
+			writeError(w, http.StatusNotFound, fmt.Sprintf("unknown provider %q", name))
+			return
+		}
+
+		state, err := user.GenerateToken()
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to generate state")
+			return
+		}
+
+		http.SetCookie(w, &http.Cookie{
+			Name:     stateCookieName,
+			Value:    state,
+			Path:     "/oauth/",
+			MaxAge:   600,
+			HttpOnly: true,
+			Secure:   r.TLS != nil,
+			SameSite: http.SameSiteLaxMode,
+		})
+
+		params := url.Values{}
+		params.Set("client_id", provider.ClientID)
+		params.Set("redirect_uri", provider.RedirectURL)
+		params.Set("response_type", "code")
+		if len(provider.Scopes) > 0 {
+			params.Set("scope", strings.Join(provider.Scopes, " "))
+		}
+		params.Set("state", state)
+
+		http.Redirect(w, r, provider.AuthURL+"?"+params.Encode(), http.StatusFound)
+	}
 }
 
 func makeCallbackHandler(d *sql.DB, providers map[string]Provider) http.HandlerFunc {
@@ -42,11 +85,27 @@ func makeCallbackHandler(d *sql.DB, providers map[string]Provider) http.HandlerF
 		}
 
 		code := r.URL.Query().Get("code")
-		state := r.URL.Query().Get("state")
 		if code == "" {
 			writeError(w, http.StatusBadRequest, "missing code parameter")
 			return
 		}
+
+		cookie, err := r.Cookie(stateCookieName)
+		if err != nil || cookie.Value == "" {
+			writeError(w, http.StatusBadRequest, "missing oauth state cookie; start the flow at /oauth/{provider}/start")
+			return
+		}
+		queryState := r.URL.Query().Get("state")
+		if queryState == "" || subtle.ConstantTimeCompare([]byte(queryState), []byte(cookie.Value)) != 1 {
+			writeError(w, http.StatusBadRequest, "oauth state mismatch")
+			return
+		}
+		http.SetCookie(w, &http.Cookie{
+			Name:   stateCookieName,
+			Value:  "",
+			Path:   "/oauth/",
+			MaxAge: -1,
+		})
 
 		accessToken, err := exchangeCode(provider, code)
 		if err != nil {
@@ -86,9 +145,6 @@ func makeCallbackHandler(d *sql.DB, providers map[string]Provider) http.HandlerF
 
 		params := url.Values{}
 		params.Set("token", token)
-		if state != "" {
-			params.Set("state", state)
-		}
 		http.Redirect(w, r, provider.SuccessRedirectURL+"#"+params.Encode(), http.StatusFound)
 	}
 }

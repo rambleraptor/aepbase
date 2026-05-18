@@ -14,9 +14,15 @@ type Provider struct {
 	RedirectURL string
 
 	// SuccessRedirectURL receives the minted token in the URL fragment
-	// (#token=...&state=...) so it never appears in access logs.
+	// (#token=...) so it never appears in access logs.
 	SuccessRedirectURL string
 
+	// Scopes is the space-joined `scope` value sent to the authorize
+	// endpoint. For OIDC providers (Google, etc.) include at least
+	// "openid email".
+	Scopes []string
+
+	AuthURL     string
 	TokenURL    string
 	UserInfoURL string
 
