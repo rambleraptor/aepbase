@@ -98,6 +98,94 @@ curl -X POST http://localhost:8080/users/:logout \
 
 This revokes the token. The user can log in again to get a new one.
 
+## OAuth
+
+aepbase can mint the same bearer token from an OAuth 2.0 provider
+(Google, GitHub, etc.). The library reads no credentials from the
+environment — the consumer supplies them via `State.EnableOAuth`.
+
+### Enabling OAuth
+
+OAuth requires users to be enabled first. Register one or more providers:
+
+```go
+state := aepbase.NewState(d, "https://yourapi.example.com")
+if err := state.EnableUsers(); err != nil { log.Fatal(err) }
+
+if err := state.EnableOAuth(oauth.Provider{
+    Name:               "google",
+    ClientID:           os.Getenv("GOOGLE_CLIENT_ID"),
+    ClientSecret:       os.Getenv("GOOGLE_CLIENT_SECRET"),
+    RedirectURL:        "https://yourapi.example.com/oauth/google/callback",
+    SuccessRedirectURL: "https://yourapp.example.com/auth/callback",
+    Scopes:             []string{"openid", "email", "profile"},
+    AuthURL:            "https://accounts.google.com/o/oauth2/v2/auth",
+    TokenURL:           "https://oauth2.googleapis.com/token",
+    UserInfoURL:        "https://openidconnect.googleapis.com/v1/userinfo",
+    AllowRegistration:  true,
+}); err != nil {
+    log.Fatal(err)
+}
+```
+
+`RedirectURL` must resolve to `/oauth/{Name}/callback` on this server and
+match what was registered with the provider. `SuccessRedirectURL` is
+where the user is sent after a successful login.
+
+### The flow
+
+Two routes are exposed (only when at least one provider is registered):
+
+| Route | Purpose |
+|-------|---------|
+| `GET /oauth/{provider}/start` | Sets a CSRF cookie, 302s to the provider's authorize URL |
+| `GET /oauth/{provider}/callback` | Verifies the cookie, exchanges the code, mints a token, 302s to `SuccessRedirectURL` |
+
+The frontend just needs a link:
+
+```html
+<a href="https://yourapi.example.com/oauth/google/start">Sign in with Google</a>
+```
+
+After the callback completes, the user lands at
+`{SuccessRedirectURL}#token=…`. The token is in the URL **fragment** so
+it never appears in server access logs. Read it client-side:
+
+```js
+const fragment = new URLSearchParams(window.location.hash.slice(1));
+const token = fragment.get("token");
+localStorage.setItem("api_token", token);
+history.replaceState(null, "", window.location.pathname);
+```
+
+The token is the same Bearer token that `POST /users/:login` returns —
+use it identically on subsequent requests.
+
+### Account creation and linking
+
+When a callback completes, aepbase resolves the user in three steps:
+
+1. **Identity match.** If `_oauth_identities` has a row for
+   `(provider, sub)`, that user signs in.
+2. **Email auto-link.** Otherwise, if a local user with the same email
+   exists, the new identity is linked to that user. (Useful when a user
+   originally signed up with a password and later clicks "Sign in with
+   Google".)
+3. **New user.** Only if `AllowRegistration: true`. A new local user is
+   created with the provider's email and display name; the password
+   hash is set to a sentinel that rejects every password attempt.
+
+When `AllowRegistration` is false (the default), step 3 returns **403**.
+This is the safer default for deployments that gate account creation —
+new users must be provisioned by a superuser first.
+
+### Multiple providers
+
+Call `EnableOAuth` with as many providers as you like. Each gets its
+own pair of routes and its own row in `_oauth_identities`. A single
+local user can be linked to multiple providers (e.g. Google + GitHub
+for the same email).
+
 ## User CRUD
 
 The user resource is a standard AEP-resource. There is some authorization baked in:
