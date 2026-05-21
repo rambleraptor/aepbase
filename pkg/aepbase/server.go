@@ -41,10 +41,11 @@ type ServerOptions struct {
 	EnableUsers bool
 	// Middlewares are user-registered http handlers that run on every request,
 	// in registration order (first is outermost). They run after CORS preflight
-	// handling and, when EnableUsers is set, before the built-in auth middleware
-	// — so logging or rate-limiting middleware here will see all requests,
-	// including unauthenticated ones. To run middleware after auth has resolved
-	// the user, call State.Use() directly after aepbase.Run wires the state.
+	// handling and, when EnableUsers is set, after the built-in auth middleware
+	// — so middleware here sees requests with the user already resolved (via
+	// user.FromContext) and unauthenticated requests are rejected before
+	// reaching it. To run middleware before auth (e.g. to see all requests,
+	// including 401s), call State.Use() before EnableUsers directly.
 	Middlewares []Middleware
 	corsRaw     string
 }
@@ -127,15 +128,16 @@ func Run(opts ServerOptions) error {
 	if opts.EnableFileFields {
 		state.EnableFileFields(filepath.Join(opts.DataDir, "files"))
 	}
-	// Register user-provided middleware before EnableUsers so it wraps the
-	// built-in auth middleware (sees all requests, including 401s).
-	if len(opts.Middlewares) > 0 {
-		state.Use(opts.Middlewares...)
-	}
+	// Enable users before registering user-provided middleware so the built-in
+	// auth middleware is the outermost wrapper and runs first — user
+	// middleware then sees requests with the authenticated user resolved.
 	if opts.EnableUsers {
 		if err := state.EnableUsers(); err != nil {
 			return fmt.Errorf("failed to enable users: %v", err)
 		}
+	}
+	if len(opts.Middlewares) > 0 {
+		state.Use(opts.Middlewares...)
 	}
 
 	// Load existing resource definitions from a previous run.
