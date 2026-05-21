@@ -86,9 +86,11 @@ type State struct {
 // CORS preflight handling, in registration order — the first registered
 // is the outermost wrapper. Built-in features like user authentication
 // (see EnableUsers) register their own middleware via this same mechanism,
-// so calling Use before EnableUsers makes your middleware wrap auth, while
-// calling Use after EnableUsers makes your middleware run after auth has
-// resolved the user (accessible via user.FromContext).
+// so calling EnableUsers before Use (the default in aepbase.Run) makes
+// auth the outermost wrapper — your middleware then runs after auth has
+// resolved the user (accessible via user.FromContext). Calling Use before
+// EnableUsers makes your middleware wrap auth and see all requests,
+// including unauthenticated ones.
 func (s *State) Use(mw ...Middleware) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
