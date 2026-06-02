@@ -6,6 +6,10 @@ type Provider struct {
 	// Name appears in the callback URL: /oauth/{Name}/callback.
 	Name string
 
+	// DisplayName is the human-facing label clients show on the sign-in
+	// button (e.g. "Google"). Falls back to Name when empty.
+	DisplayName string
+
 	ClientID     string
 	ClientSecret string
 

@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -27,8 +28,34 @@ const stateCookieName = "aepbase_oauth_state"
 var ErrRegistrationDisabled = errors.New("registration disabled for this provider")
 
 func RegisterRoutes(mux *http.ServeMux, d *sql.DB, providers map[string]Provider) {
+	mux.HandleFunc("GET /oauth/providers", makeProvidersHandler(providers))
 	mux.HandleFunc("GET /oauth/{provider}/start", makeStartHandler(providers))
 	mux.HandleFunc("GET /oauth/{provider}/callback", makeCallbackHandler(d, providers))
+}
+
+// makeProvidersHandler lists the configured providers (name + display name)
+// so unauthenticated clients can render sign-in buttons without hard-coding
+// them. Secrets are never exposed.
+func makeProvidersHandler(providers map[string]Provider) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		names := make([]string, 0, len(providers))
+		for name := range providers {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+
+		out := make([]map[string]string, 0, len(names))
+		for _, name := range names {
+			p := providers[name]
+			display := p.DisplayName
+			if display == "" {
+				display = p.Name
+			}
+			out = append(out, map[string]string{"name": p.Name, "display_name": display})
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"providers": out})
+	}
 }
 
 func makeStartHandler(providers map[string]Provider) http.HandlerFunc {

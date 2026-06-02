@@ -201,6 +201,12 @@ func handleGet(d *sql.DB, w http.ResponseWriter, r *http.Request, id string) {
 		writeError(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
+	// "me" resolves to the authenticated caller — a whoami for clients that
+	// hold only a token (e.g. after OAuth login, where the callback returns a
+	// bare token).
+	if id == "me" {
+		id = caller.ID
+	}
 	// Regular users can only get their own record.
 	if caller.Type != TypeSuperuser && caller.ID != id {
 		writeError(w, http.StatusForbidden, "you can only view your own user")
