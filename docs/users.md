@@ -89,6 +89,21 @@ curl http://localhost:8080/widgets \
 
 Requests without a valid token receive `401 Unauthorized`.
 
+### Whoami
+
+A client that holds only a token (for example after an OAuth login, where
+the callback hands back a bare token) can resolve the current user with the
+`me` alias on the user resource:
+
+```sh
+curl http://localhost:8080/users/me \
+  -H 'Authorization: Bearer a4b4c5d6e7f8...'
+```
+
+This returns the authenticated user's record — identical to
+`GET /users/{id}` for that user's own id. Like every other endpoint except
+login, it requires a valid token.
+
 ### Logout
 
 ```sh
@@ -114,6 +129,7 @@ if err := state.EnableUsers(); err != nil { log.Fatal(err) }
 
 if err := state.EnableOAuth(oauth.Provider{
     Name:               "google",
+    DisplayName:        "Google",
     ClientID:           os.Getenv("GOOGLE_CLIENT_ID"),
     ClientSecret:       os.Getenv("GOOGLE_CLIENT_SECRET"),
     RedirectURL:        "https://yourapi.example.com/oauth/google/callback",
@@ -134,10 +150,11 @@ where the user is sent after a successful login.
 
 ### The flow
 
-Two routes are exposed (only when at least one provider is registered):
+These routes are exposed (only when at least one provider is registered):
 
 | Route | Purpose |
 |-------|---------|
+| `GET /oauth/providers` | Lists configured providers as `{name, display_name}` so a frontend can render buttons without hard-coding them (no secrets exposed; unauthenticated) |
 | `GET /oauth/{provider}/start` | Sets a CSRF cookie, 302s to the provider's authorize URL |
 | `GET /oauth/{provider}/callback` | Verifies the cookie, exchanges the code, mints a token, 302s to `SuccessRedirectURL` |
 
@@ -145,6 +162,13 @@ The frontend just needs a link:
 
 ```html
 <a href="https://yourapi.example.com/oauth/google/start">Sign in with Google</a>
+```
+
+`GET /oauth/providers` returns the configured providers, using each
+provider's `DisplayName` (falling back to `Name`) as the button label:
+
+```json
+{ "providers": [{ "name": "google", "display_name": "Google" }] }
 ```
 
 After the callback completes, the user lands at
@@ -159,7 +183,9 @@ history.replaceState(null, "", window.location.pathname);
 ```
 
 The token is the same Bearer token that `POST /users/:login` returns —
-use it identically on subsequent requests.
+use it identically on subsequent requests. Because the callback returns
+only a token (not the user record), fetch the signed-in user with
+[`GET /users/me`](#whoami) once you have it.
 
 ### Account creation and linking
 
