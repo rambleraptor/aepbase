@@ -80,6 +80,7 @@ func newTestStateWithOAuth(t *testing.T, providers ...oauth.Provider) (*aepbase.
 	if err := state.EnableUsers(); err != nil {
 		t.Fatalf("EnableUsers: %v", err)
 	}
+	provisionAdmin(t, state)
 	if len(providers) > 0 {
 		if err := state.EnableOAuth(providers...); err != nil {
 			t.Fatalf("EnableOAuth: %v", err)

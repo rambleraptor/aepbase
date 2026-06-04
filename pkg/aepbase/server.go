@@ -13,6 +13,7 @@ import (
 	"github.com/aep-dev/aep-lib-go/pkg/openapi"
 	"github.com/rambleraptor/aepbase/pkg/db"
 	"github.com/rambleraptor/aepbase/pkg/meta"
+	"github.com/rambleraptor/aepbase/pkg/user"
 )
 
 // ServerOptions configures an aepbase server.
@@ -180,6 +181,41 @@ func Run(opts ServerOptions) error {
 	log.Printf("aepbase listening on %s", serverURL)
 	log.Printf("OpenAPI spec at %s/openapi.json", serverURL)
 	return http.ListenAndServe(fmt.Sprintf(":%d", opts.Port), state.Handler())
+}
+
+// CreateSuperuser opens the database configured by opts and inserts a new
+// superuser with the given email, display name, and password. The users table
+// is created if it does not yet exist, so this can be run before the server's
+// first start. It powers the `create-superuser` CLI subcommand, letting an
+// operator (or an automated system) provision access when EnableUsers is set.
+// Returns user.ErrEmailExists if a user with that email already exists.
+func CreateSuperuser(opts ServerOptions, email, displayName, password string) error {
+	if email == "" {
+		return fmt.Errorf("email is required")
+	}
+	if password == "" {
+		return fmt.Errorf("password is required")
+	}
+	if opts.DataDir == "" {
+		opts.DataDir = "aepbase_data"
+	}
+	if opts.DBFile == "" {
+		opts.DBFile = "aepbase.db"
+	}
+	dbPath := filepath.Join(opts.DataDir, opts.DBFile)
+	d, err := db.Init(dbPath)
+	if err != nil {
+		return fmt.Errorf("failed to initialize database: %w", err)
+	}
+	defer d.Close()
+
+	if err := user.CreateUsersTable(d); err != nil {
+		return fmt.Errorf("creating users table: %w", err)
+	}
+	if _, err := user.CreateSuperuser(d, email, displayName, password); err != nil {
+		return err
+	}
+	return nil
 }
 
 // topoSortDefs orders resource definitions so that parents come before children.

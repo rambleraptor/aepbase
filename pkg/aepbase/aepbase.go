@@ -54,18 +54,18 @@ type customMethodRegistration struct {
 }
 
 type State struct {
-	mu                    sync.RWMutex
-	API                   *api.API
-	mux                   *http.ServeMux
-	DB                    *sql.DB
-	ServerURL             string
-	CORSAllowedOrigins    []string
-	customMethods         []customMethodRegistration
-	pendingCustomMethods  []customMethodRegistration
-	resourceDescriptions  map[string]string              // singular -> description
-	resourceExamples      map[string]map[string]any      // singular -> field -> example value
-	singletonResources    map[string]bool                // singular -> true for singleton resources
-	resourceEnums         map[string]map[string][]string // singular -> field name -> allowed enum values
+	mu                   sync.RWMutex
+	API                  *api.API
+	mux                  *http.ServeMux
+	DB                   *sql.DB
+	ServerURL            string
+	CORSAllowedOrigins   []string
+	customMethods        []customMethodRegistration
+	pendingCustomMethods []customMethodRegistration
+	resourceDescriptions map[string]string              // singular -> description
+	resourceExamples     map[string]map[string]any      // singular -> field -> example value
+	singletonResources   map[string]bool                // singular -> true for singleton resources
+	resourceEnums        map[string]map[string][]string // singular -> field name -> allowed enum values
 	// File-field support (library-only, opt-in, off by default). When
 	// fileFieldsEnabled is false, schemas containing x-aepbase-file-field
 	// are rejected at resource registration time.
@@ -126,8 +126,8 @@ func NewState(d *sql.DB, serverURL string) *State {
 		},
 		resourceExamples: map[string]map[string]any{
 			"aep-resource-definition": {
-				"singular": "book",
-				"plural":   "books",
+				"singular":    "book",
+				"plural":      "books",
 				"description": "A book published by a publisher.",
 				"schema": map[string]any{
 					"type": "object",
@@ -146,17 +146,17 @@ func NewState(d *sql.DB, serverURL string) *State {
 		Schema: &openapi.Schema{
 			Type: "object",
 			Properties: openapi.Properties{
-				"id":          {Type: "string", ReadOnly: true, Description: "The unique identifier for this resource definition."},
-				"path":        {Type: "string", ReadOnly: true, Description: "The full resource path (e.g. aep-resource-definitions/book)."},
-				"singular":    {Type: "string", Description: "The singular name of the resource (e.g. book)."},
-				"plural":      {Type: "string", Description: "The plural name of the resource, used as the URL collection path (e.g. books)."},
-				"description": {Type: "string", Description: "A human-readable description of the resource."},
-				"examples":    {Type: "object", Description: "Example values for the resource's fields, keyed by field name."},
-				"schema":      {Type: "object", Description: "The JSON Schema defining the resource's properties."},
-				"parents":         {Type: "array", Items: &openapi.Schema{Type: "string"}, Description: "The singular names of parent resources for nested resources."},
+				"id":                   {Type: "string", ReadOnly: true, Description: "The unique identifier for this resource definition."},
+				"path":                 {Type: "string", ReadOnly: true, Description: "The full resource path (e.g. aep-resource-definitions/book)."},
+				"singular":             {Type: "string", Description: "The singular name of the resource (e.g. book)."},
+				"plural":               {Type: "string", Description: "The plural name of the resource, used as the URL collection path (e.g. books)."},
+				"description":          {Type: "string", Description: "A human-readable description of the resource."},
+				"examples":             {Type: "object", Description: "Example values for the resource's fields, keyed by field name."},
+				"schema":               {Type: "object", Description: "The JSON Schema defining the resource's properties."},
+				"parents":              {Type: "array", Items: &openapi.Schema{Type: "string"}, Description: "The singular names of parent resources for nested resources."},
 				"user_settable_create": {Type: "boolean", Description: "Whether clients can set the resource ID on creation."},
-				"create_time": {Type: "string", Format: "date-time", ReadOnly: true, Description: "The time this resource definition was created."},
-				"update_time": {Type: "string", Format: "date-time", ReadOnly: true, Description: "The time this resource definition was last updated."},
+				"create_time":          {Type: "string", Format: "date-time", ReadOnly: true, Description: "The time this resource definition was created."},
+				"update_time":          {Type: "string", Format: "date-time", ReadOnly: true, Description: "The time this resource definition was last updated."},
 			},
 		},
 		Children: []*api.Resource{},
@@ -194,10 +194,10 @@ func (s *State) FileFieldsEnabled() bool {
 }
 
 // EnableUsers turns on user authentication and authorization. When enabled,
-// all API requests (except login) require a valid Bearer token. If no users
-// exist in the database, a default superuser is created and its credentials
-// are logged to stdout. This method is library-only; it is not exposed via
-// CLI flags.
+// all API requests (except login) require a valid Bearer token. No users are
+// created automatically — provision the first superuser with the
+// `create-superuser` CLI subcommand (see CreateSuperuser). This method is
+// library-only; it is not exposed via CLI flags.
 func (s *State) EnableUsers() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -207,27 +207,6 @@ func (s *State) EnableUsers() error {
 	}
 	if err := user.CreateTokensTable(s.DB); err != nil {
 		return fmt.Errorf("creating tokens table: %w", err)
-	}
-
-	// Bootstrap: if no users exist, create a default superuser.
-	count, err := user.CountUsers(s.DB)
-	if err != nil {
-		return fmt.Errorf("counting users: %w", err)
-	}
-	if count == 0 {
-		password, err := user.GenerateToken() // reuse random hex for password
-		if err != nil {
-			return fmt.Errorf("generating default password: %w", err)
-		}
-		password = password[:16] // trim to 16 chars for readability
-		if err := createBootstrapUser(s.DB, password); err != nil {
-			return fmt.Errorf("creating bootstrap superuser: %w", err)
-		}
-		fmt.Printf("=== DEFAULT SUPERUSER CREATED ===\n")
-		fmt.Printf("  Email:    admin@example.com\n")
-		fmt.Printf("  Password: %s\n", password)
-		fmt.Printf("  Change this password immediately.\n")
-		fmt.Printf("=================================\n")
 	}
 
 	// Register the user resource in the API for OpenAPI generation and
@@ -313,26 +292,6 @@ func (s *State) OAuthEnabled() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return len(s.oauthProviders) > 0
-}
-
-// createBootstrapUser inserts the initial superuser into the database.
-func createBootstrapUser(d *sql.DB, password string) error {
-	hash, err := user.HashPassword(password)
-	if err != nil {
-		return err
-	}
-	id := user.GenerateID()
-	now := time.Now().UTC().Format(time.RFC3339)
-	u := &user.User{
-		ID:          id,
-		Path:        "users/" + id,
-		Email:       "admin@example.com",
-		DisplayName: "Admin",
-		Type:        user.TypeSuperuser,
-		CreateTime:  now,
-		UpdateTime:  now,
-	}
-	return user.InsertUser(d, u, hash)
 }
 
 func (s *State) Handler() http.Handler {
