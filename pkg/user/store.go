@@ -5,10 +5,43 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 )
+
+// ErrEmailExists is returned when creating a user whose email (or generated
+// id) collides with an existing user.
+var ErrEmailExists = errors.New("a user with that email already exists")
+
+// CreateSuperuser inserts a new superuser with the given email, display name,
+// and password, and returns the created record. It returns ErrEmailExists if
+// the email is already taken.
+func CreateSuperuser(d *sql.DB, email, displayName, password string) (*User, error) {
+	hash, err := HashPassword(password)
+	if err != nil {
+		return nil, fmt.Errorf("hashing password: %w", err)
+	}
+	id := GenerateID()
+	now := time.Now().UTC().Format(time.RFC3339)
+	u := &User{
+		ID:          id,
+		Path:        "users/" + id,
+		Email:       email,
+		DisplayName: displayName,
+		Type:        TypeSuperuser,
+		CreateTime:  now,
+		UpdateTime:  now,
+	}
+	if err := InsertUser(d, u, hash); err != nil {
+		if isUniqueConstraintError(err) {
+			return nil, ErrEmailExists
+		}
+		return nil, err
+	}
+	return u, nil
+}
 
 // CreateUsersTable creates the _users table if it does not exist.
 func CreateUsersTable(d *sql.DB) error {

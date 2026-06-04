@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -19,6 +20,7 @@ import (
 	"github.com/rambleraptor/aepbase/pkg/aepbase"
 	"github.com/rambleraptor/aepbase/pkg/db"
 	"github.com/rambleraptor/aepbase/pkg/meta"
+	"github.com/rambleraptor/aepbase/pkg/user"
 )
 
 // helper to create a fresh State with an in-memory SQLite DB.
@@ -2696,6 +2698,20 @@ func keysOf(m map[string]any) []string {
 
 // --- User Support Tests ---
 
+// testAdminPassword is the password for the admin superuser that the
+// user-support test helpers provision via provisionAdmin.
+const testAdminPassword = "admin-test-pass"
+
+// provisionAdmin inserts the admin@example.com superuser used across the
+// user-support tests. It replaces the old auto-bootstrap behavior; EnableUsers
+// must have been called on state first.
+func provisionAdmin(t *testing.T, state *aepbase.State) {
+	t.Helper()
+	if _, err := user.CreateSuperuser(state.DB, "admin@example.com", "Admin", testAdminPassword); err != nil {
+		t.Fatalf("CreateSuperuser: %v", err)
+	}
+}
+
 func newTestStateWithUsers(t *testing.T) (*aepbase.State, http.Handler) {
 	t.Helper()
 	d, err := db.Init(":memory:")
@@ -2707,7 +2723,56 @@ func newTestStateWithUsers(t *testing.T) (*aepbase.State, http.Handler) {
 	if err := state.EnableUsers(); err != nil {
 		t.Fatalf("EnableUsers: %v", err)
 	}
+	provisionAdmin(t, state)
 	return state, state.Handler()
+}
+
+// TestCreateSuperuser exercises the entry point behind the `create-superuser`
+// CLI subcommand: it writes a superuser to the on-disk database that a server
+// started against the same database can then authenticate.
+func TestCreateSuperuser(t *testing.T) {
+	dir := t.TempDir()
+	opts := aepbase.ServerOptions{DataDir: dir, DBFile: "test.db"}
+
+	if err := aepbase.CreateSuperuser(opts, "root@example.com", "Root", "rootpass"); err != nil {
+		t.Fatalf("CreateSuperuser: %v", err)
+	}
+
+	// A duplicate email is reported as ErrEmailExists.
+	if err := aepbase.CreateSuperuser(opts, "root@example.com", "Root", "rootpass"); !errors.Is(err, user.ErrEmailExists) {
+		t.Fatalf("expected ErrEmailExists, got %v", err)
+	}
+
+	// Email and password are required.
+	if err := aepbase.CreateSuperuser(opts, "", "", "pw"); err == nil {
+		t.Fatal("expected error for missing email")
+	}
+	if err := aepbase.CreateSuperuser(opts, "x@example.com", "", ""); err == nil {
+		t.Fatal("expected error for missing password")
+	}
+
+	// A server backed by the same database authenticates the new superuser.
+	d, err := db.Init(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("db.Init: %v", err)
+	}
+	t.Cleanup(func() { d.Close() })
+	state := aepbase.NewState(d, "http://localhost:8080")
+	if err := state.EnableUsers(); err != nil {
+		t.Fatalf("EnableUsers: %v", err)
+	}
+	h := state.Handler()
+
+	resp := doAuthRequest(t, h, "POST", "/users/:login", `{"email":"root@example.com","password":"rootpass"}`, "")
+	if resp.StatusCode != 200 {
+		m := readJSON(t, resp)
+		t.Fatalf("login as created superuser: expected 200, got %d %v", resp.StatusCode, m)
+	}
+	m := readJSON(t, resp)
+	u := m["user"].(map[string]any)
+	if u["type"] != "superuser" {
+		t.Fatalf("expected type superuser, got %v", u["type"])
+	}
 }
 
 func doAuthRequest(t *testing.T, handler http.Handler, method, path, body, token string) *http.Response {
@@ -2782,20 +2847,33 @@ func TestOpenAPIExemptFromAuth(t *testing.T) {
 
 func TestLoginLogout(t *testing.T) {
 	_, h := newTestStateWithUsers(t)
-	// We need to discover the auto-generated password. Since it's logged to
-	// stdout, we capture it. Instead, let's test with a known user we create.
-	// But we need the admin password first. We'll test login failure instead,
-	// then create a user flow via the admin.
 
 	// Login with wrong password should fail.
 	resp := doAuthRequest(t, h, "POST", "/users/:login", `{"email":"admin@example.com","password":"wrong"}`, "")
 	if resp.StatusCode != 401 {
 		t.Fatalf("expected 401 for wrong password, got %d", resp.StatusCode)
 	}
+
+	// Login with the correct password succeeds and returns a usable token.
+	token := loginAdmin(t, h, testAdminPassword)
+	resp = doAuthRequest(t, h, "GET", "/users", "", token)
+	if resp.StatusCode != 200 {
+		t.Fatalf("list users with token: expected 200, got %d", resp.StatusCode)
+	}
+
+	// After logout the token is revoked.
+	resp = doAuthRequest(t, h, "POST", "/users/:logout", "", token)
+	if resp.StatusCode != 200 {
+		t.Fatalf("logout: expected 200, got %d", resp.StatusCode)
+	}
+	resp = doAuthRequest(t, h, "GET", "/users", "", token)
+	if resp.StatusCode != 401 {
+		t.Fatalf("list users after logout: expected 401, got %d", resp.StatusCode)
+	}
 }
 
-// TestFullUserFlow captures stdout to get the bootstrap password, then exercises
-// the full CRUD and auth flow.
+// TestFullUserFlow provisions an admin superuser, then exercises the full CRUD
+// and auth flow.
 func TestFullUserFlow(t *testing.T) {
 	d, err := db.Init(":memory:")
 	if err != nil {
@@ -2804,39 +2882,15 @@ func TestFullUserFlow(t *testing.T) {
 	t.Cleanup(func() { d.Close() })
 	state := aepbase.NewState(d, "http://localhost:8080")
 
-	// Capture stdout to get the bootstrap password.
-	oldStdout := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
-
 	if err := state.EnableUsers(); err != nil {
-		os.Stdout = oldStdout
 		t.Fatalf("EnableUsers: %v", err)
 	}
-
-	w.Close()
-	os.Stdout = oldStdout
-	outBytes, _ := io.ReadAll(r)
-	output := string(outBytes)
-
-	// Parse the password from output.
-	var password string
-	for _, line := range strings.Split(output, "\n") {
-		if strings.Contains(line, "Password:") {
-			parts := strings.SplitN(line, ":", 2)
-			if len(parts) == 2 {
-				password = strings.TrimSpace(parts[1])
-			}
-		}
-	}
-	if password == "" {
-		t.Fatalf("could not find password in output: %s", output)
-	}
+	provisionAdmin(t, state)
 
 	h := state.Handler()
 
 	// Login as admin.
-	adminToken := loginAdmin(t, h, password)
+	adminToken := loginAdmin(t, h, testAdminPassword)
 
 	// List users as admin (superuser).
 	resp := doAuthRequest(t, h, "GET", "/users", "", adminToken)
@@ -2925,29 +2979,13 @@ func TestUserScopedChildResources(t *testing.T) {
 	t.Cleanup(func() { d.Close() })
 	state := aepbase.NewState(d, "http://localhost:8080")
 
-	// Capture stdout for bootstrap password.
-	oldStdout := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
 	if err := state.EnableUsers(); err != nil {
-		os.Stdout = oldStdout
 		t.Fatalf("EnableUsers: %v", err)
 	}
-	w.Close()
-	os.Stdout = oldStdout
-	outBytes, _ := io.ReadAll(r)
-	var password string
-	for _, line := range strings.Split(string(outBytes), "\n") {
-		if strings.Contains(line, "Password:") {
-			parts := strings.SplitN(line, ":", 2)
-			if len(parts) == 2 {
-				password = strings.TrimSpace(parts[1])
-			}
-		}
-	}
+	provisionAdmin(t, state)
 
 	h := state.Handler()
-	adminToken := loginAdmin(t, h, password)
+	adminToken := loginAdmin(t, h, testAdminPassword)
 
 	// Create a child resource under users: users/{user_id}/preferences
 	resp := doAuthRequest(t, h, "POST", "/aep-resource-definitions", `{
@@ -3028,28 +3066,13 @@ func TestUserUpdateSelf(t *testing.T) {
 	t.Cleanup(func() { d.Close() })
 	state := aepbase.NewState(d, "http://localhost:8080")
 
-	oldStdout := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
 	if err := state.EnableUsers(); err != nil {
-		os.Stdout = oldStdout
 		t.Fatalf("EnableUsers: %v", err)
 	}
-	w.Close()
-	os.Stdout = oldStdout
-	outBytes, _ := io.ReadAll(r)
-	var password string
-	for _, line := range strings.Split(string(outBytes), "\n") {
-		if strings.Contains(line, "Password:") {
-			parts := strings.SplitN(line, ":", 2)
-			if len(parts) == 2 {
-				password = strings.TrimSpace(parts[1])
-			}
-		}
-	}
+	provisionAdmin(t, state)
 
 	h := state.Handler()
-	adminToken := loginAdmin(t, h, password)
+	adminToken := loginAdmin(t, h, testAdminPassword)
 
 	// Create a regular user.
 	resp := doAuthRequest(t, h, "POST", "/users", `{"email":"bob@test.com","password":"bobpass","type":"regular"}`, adminToken)
@@ -3112,28 +3135,13 @@ func TestUserUpdatePermissions(t *testing.T) {
 	t.Cleanup(func() { d.Close() })
 	state := aepbase.NewState(d, "http://localhost:8080")
 
-	oldStdout := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
 	if err := state.EnableUsers(); err != nil {
-		os.Stdout = oldStdout
 		t.Fatalf("EnableUsers: %v", err)
 	}
-	w.Close()
-	os.Stdout = oldStdout
-	outBytes, _ := io.ReadAll(r)
-	var password string
-	for _, line := range strings.Split(string(outBytes), "\n") {
-		if strings.Contains(line, "Password:") {
-			parts := strings.SplitN(line, ":", 2)
-			if len(parts) == 2 {
-				password = strings.TrimSpace(parts[1])
-			}
-		}
-	}
+	provisionAdmin(t, state)
 
 	h := state.Handler()
-	adminToken := loginAdmin(t, h, password)
+	adminToken := loginAdmin(t, h, testAdminPassword)
 
 	// Create two regular users.
 	resp := doAuthRequest(t, h, "POST", "/users", `{"email":"alice@test.com","password":"alicepass","type":"regular"}`, adminToken)

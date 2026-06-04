@@ -30,16 +30,27 @@ if err := state.EnableUsers(); err != nil {
 }
 ```
 
-On first run, if no users exist, a default superuser is created and its
-credentials are printed to stdout:
+No users are created automatically. When user support is enabled, every
+endpoint except login requires a valid token — so you must create the first
+superuser out-of-band before anyone can sign in.
 
+## Creating a superuser
+
+Use the `create-superuser` CLI subcommand. It writes the superuser directly
+to the database, so it can run before the server's first start (and is safe
+to script from an agent or provisioning system):
+
+```sh
+aepbase create-superuser \
+  -email admin@example.com \
+  -password 'change-me' \
+  -display-name Admin
 ```
-=== DEFAULT SUPERUSER CREATED ===
-  Email:    admin@example.com
-  Password: 7d337c645cb70980
-  Change this password immediately.
-=================================
-```
+
+It honors the same `-data-dir` and `-db` flags as the server, so point it at
+the same database the server uses. Re-running with an existing email is
+rejected. Create additional users (superuser or regular) over the API once
+you can authenticate as a superuser.
 
 ## User types
 
@@ -57,7 +68,7 @@ There are two user types:
 ```sh
 curl -X POST http://localhost:8080/users/:login \
   -H 'Content-Type: application/json' \
-  -d '{"email":"admin@example.com","password":"7d337c645cb70980"}'
+  -d '{"email":"admin@example.com","password":"change-me"}'
 ```
 
 Response:
